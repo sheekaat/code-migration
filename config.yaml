@@ -1,0 +1,22 @@
+# Code Migration Platform Configuration
+
+llm:
+  model: gemini-2.5-flash
+  max_tokens: 8000
+  chunk_size: 300        # lines per chunk sent to LLM
+  context_window: 4      # previous chunks kept in context
+  temperature: 0.1       # low temp for deterministic code
+
+conversion:
+  confidence_threshold: 0.75   # below this → human review
+  rule_engine_first: true      # always try rules before LLM
+  cache_patterns: true
+
+analysis:
+  complexity_red_threshold: 20
+  complexity_amber_threshold: 10
+
+output:
+  base_dir: ./output
+  generate_tests: true
+  generate_ci: true
