@@ -150,7 +150,29 @@ class StreamingConversionPipeline:
         if not source_file:
             return
 
-        # Determine output path
+        from output.file_splitter import FileSplitter, should_split_file
+        
+        # Check if content needs intelligent splitting (multiple classes)
+        if target == TargetLanguage.JAVA_SPRING and should_split_file(result.converted_code, 'java'):
+            log.info("  Detected multi-class content, intelligently splitting...")
+            
+            # Determine base package path from source file
+            base_path = self._determine_package_path(source_file)
+            
+            splitter = FileSplitter()
+            segments = splitter.intelligent_split(
+                result.converted_code,
+                base_path=base_path,
+                language='java'
+            )
+            
+            if segments:
+                written = splitter.write_segments(output_dir / "src", segments)
+                log.info("  Split into %d files: %s", len(written), 
+                        [p.name for p in written])
+                return
+        
+        # Default: write as single file
         relative_path = Path(source_file.path)
         
         # Map extension based on target language
@@ -166,6 +188,24 @@ class StreamingConversionPipeline:
 
         # Write file
         output_path.write_text(result.converted_code, encoding='utf-8')
+    
+    def _determine_package_path(self, source_file: SourceFile) -> str:
+        """Determine Java package path from source file name."""
+        stem = Path(source_file.path).stem.lower()
+        
+        # Heuristic package naming based on filename
+        if 'controller' in stem:
+            return "com/company/controller"
+        elif 'service' in stem or 'svc' in stem:
+            return "com/company/service"
+        elif 'entity' in stem or 'model' in stem:
+            return "com/company/entity"
+        elif 'repo' in stem or 'dao' in stem:
+            return "com/company/repository"
+        elif 'util' in stem or 'helper' in stem:
+            return "com/company/util"
+        
+        return "com/company/app"
 
     def get_stats(self) -> dict:
         """Get current conversion stats."""
