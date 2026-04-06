@@ -22,7 +22,7 @@ from shared.models import (
 from shared.config import get_logger
 from accuracy.scorer import AccuracyEngine, AccuracyReport, ACCURACY_THRESHOLD
 from accuracy.analyser import FailureAnalyser, RemediationStrategy
-from accuracy.remediation import RemediationExecutor
+from accuracy.enhanced_remediation import EnhancedRemediationExecutor, apply_extended_structural_fix
 from accuracy.knowledge_base import KnowledgeBase
 
 log = get_logger(__name__)
@@ -52,13 +52,14 @@ class SelfHealingAccuracyLoop:
     """
     Runs up to MAX_ITERATIONS of score → analyse → remediate
     until accuracy >= 85% or iterations exhausted.
+    Uses EnhancedRemediationExecutor with per-dimension targeting.
     """
 
     def __init__(self, config: dict, knowledge_base: Optional[KnowledgeBase] = None):
         self.config      = config
         self.scorer      = AccuracyEngine()
         self.analyser    = FailureAnalyser()
-        self.remediator  = RemediationExecutor(config)
+        self.remediator  = EnhancedRemediationExecutor(config)
         self.kb          = knowledge_base or KnowledgeBase.load()
 
     def run(self, result: ConversionResult) -> LoopResult:
@@ -79,6 +80,16 @@ class SelfHealingAccuracyLoop:
                 log.info("  KB pre-pass: applied %d learned rules", len(kb_rules))
                 result.converted_code = patched
                 result.rules_applied  = list(result.rules_applied or []) + kb_rules
+
+        # ── Extended structural pre-pass ──────────────────────────────────
+        if target and result.converted_code:
+            patched, structural_fixes = apply_extended_structural_fix(
+                result.converted_code, target, None
+            )
+            if structural_fixes:
+                log.info("  Structural pre-pass: applied %d fixes", len(structural_fixes))
+                result.converted_code = patched
+                result.rules_applied = list(result.rules_applied or []) + structural_fixes
 
         for iteration in range(1, MAX_ITERATIONS + 1):
             log.info("  [Accuracy Loop] %s — iteration %d/%d", path, iteration, MAX_ITERATIONS)

@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Code Migration Platform</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        header {
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            padding: 1rem 2rem;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+        
+        header h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: #f0f6fc;
+        }
+        
+        .badge {
+            background: #238636;
+            color: white;
+            padding: 0.25rem 0.5rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        
+        main {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            padding: 1rem;
+            max-width: 1400px;
+            margin: 0 auto;
+            width: 100%;
+        }
+        
+        @media (max-width: 900px) {
+            main {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        .panel {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 1.5rem;
+        }
+        
+        .panel h2 {
+            font-size: 1rem;
+            font-weight: 600;
+            color: #f0f6fc;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid #30363d;
+        }
+        
+        .form-group {
+            margin-bottom: 1rem;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: #8b949e;
+        }
+        
+        select, input[type="file"] {
+            width: 100%;
+            padding: 0.625rem;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #c9d1d9;
+            font-size: 0.875rem;
+        }
+        
+        select:focus, input[type="file"]:focus {
+            outline: none;
+            border-color: #58a6ff;
+        }
+        
+        .file-drop-zone {
+            border: 2px dashed #30363d;
+            border-radius: 8px;
+            padding: 2rem;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.2s;
+        }
+        
+        .file-drop-zone:hover, .file-drop-zone.dragover {
+            border-color: #58a6ff;
+        }
+        
+        .file-drop-zone .icon {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .file-drop-zone p {
+            color: #8b949e;
+            font-size: 0.875rem;
+        }
+        
+        .file-info {
+            display: none;
+            background: #0d1117;
+            border: 1px solid #238636;
+            border-radius: 6px;
+            padding: 0.75rem;
+            margin-top: 0.5rem;
+        }
+        
+        .file-info.visible {
+            display: block;
+        }
+        
+        button {
+            background: #238636;
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+            width: 100%;
+        }
+        
+        button:hover:not(:disabled) {
+            background: #2ea043;
+        }
+        
+        button:disabled {
+            background: #30363d;
+            cursor: not-allowed;
+        }
+        
+        .console {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 1rem;
+            height: 500px;
+            overflow-y: auto;
+            font-family: 'SF Mono', Monaco, Inconsolata, 'Roboto Mono', Consolas, monospace;
+            font-size: 0.8125rem;
+            line-height: 1.5;
+        }
+        
+        .console-line {
+            padding: 0.125rem 0;
+            display: flex;
+            gap: 0.5rem;
+        }
+        
+        .console-line .timestamp {
+            color: #6e7681;
+            white-space: nowrap;
+        }
+        
+        .console-line .level {
+            font-weight: 600;
+            min-width: 4rem;
+        }
+        
+        .console-line .level.info {
+            color: #58a6ff;
+        }
+        
+        .console-line .level.success {
+            color: #238636;
+        }
+        
+        .console-line .level.error {
+            color: #f85149;
+        }
+        
+        .console-line .level.warning {
+            color: #d29922;
+        }
+        
+        .console-line .message {
+            color: #c9d1d9;
+        }
+        
+        .console-line.section {
+            margin-top: 0.5rem;
+            padding-top: 0.5rem;
+            border-top: 1px solid #21262d;
+        }
+        
+        .console-line.section .level {
+            color: #a371f7;
+        }
+        
+        .status-bar {
+            margin-top: 1rem;
+            padding: 0.75rem;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .status-bar .status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .status-bar .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #8b949e;
+        }
+        
+        .status-bar .status-dot.running {
+            background: #58a6ff;
+            animation: pulse 1s infinite;
+        }
+        
+        .status-bar .status-dot.success {
+            background: #238636;
+        }
+        
+        .status-bar .status-dot.error {
+            background: #f85149;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .download-btn {
+            display: none;
+            background: #1f6feb;
+        }
+        
+        .download-btn.visible {
+            display: block;
+        }
+        
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #30363d;
+            border-top-color: #58a6ff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 0.5rem;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Status Card */
+        .status-card {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            text-align: center;
+        }
+        
+        .status-icon {
+            font-size: 3rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .status-text {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: #f0f6fc;
+            margin-bottom: 0.5rem;
+        }
+        
+        .status-card.running .status-text {
+            color: #58a6ff;
+        }
+        
+        .status-card.success .status-text {
+            color: #2ea043;
+        }
+        
+        .status-card.error .status-text {
+            color: #f85149;
+        }
+        
+        .token-count {
+            font-size: 0.875rem;
+            color: #8b949e;
+        }
+        
+        .token-count.has-tokens {
+            color: #58a6ff;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Code Migration Platform</h1>
+        <span class="badge">v1.0</span>
+    </header>
+    
+    <main>
+        <div class="panel">
+            <h2>Upload & Convert</h2>
+            
+            <div class="form-group">
+                <label for="target">Target Language</label>
+                <select id="target">
+                    <option value="">Select target...</option>
+                    {% for target in targets %}
+                    <option value="{{ target.value }}">{{ target.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label>Source Code (ZIP)</label>
+                <div class="file-drop-zone" id="dropZone">
+                    <div class="icon">📦</div>
+                    <p>Drop ZIP file here or click to browse</p>
+                    <input type="file" id="fileInput" accept=".zip" style="display: none;">
+                </div>
+                <div class="file-info" id="fileInfo">
+                    <strong>Selected:</strong> <span id="fileName"></span>
+                </div>
+            </div>
+            
+            <button id="convertBtn" disabled>
+                Start Migration
+            </button>
+        </div>
+        
+        <div class="panel">
+            <h2>Migration Status</h2>
+            
+            <!-- Simple Status Card -->
+            <div class="status-card" id="statusCard">
+                <div class="status-icon" id="statusIcon">⏳</div>
+                <div class="status-text" id="mainStatus">Ready to start</div>
+                <div class="token-count" id="tokenCount"></div>
+            </div>
+            
+            <div class="console" id="console">
+                <div class="console-line">
+                    <span class="timestamp">--:--:--</span>
+                    <span class="level info">[INFO]</span>
+                    <span class="message">Ready. Upload a ZIP file and select target language to begin.</span>
+                </div>
+            </div>
+            
+            <div class="status-bar">
+                <div class="status">
+                    <div class="status-dot" id="statusDot"></div>
+                    <span id="statusText">Ready</span>
+                </div>
+                <button class="download-btn" id="downloadBtn">Download Result</button>
+            </div>
+        </div>
+    </main>
+    
+    <script>
+        let uploadedFile = null;
+        let jobId = null;
+        let sourcePath = null;
+        
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const fileInfo = document.getElementById('fileInfo');
+        const fileName = document.getElementById('fileName');
+        const convertBtn = document.getElementById('convertBtn');
+        const targetSelect = document.getElementById('target');
+        const consoleDiv = document.getElementById('console');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const downloadBtn = document.getElementById('downloadBtn');
+        
+        const progressTracker = document.getElementById('progressTracker');
+        const phaseDetails = document.getElementById('phaseDetails');
+        const statusCard = document.getElementById('statusCard');
+        const statusIcon = document.getElementById('statusIcon');
+        const mainStatus = document.getElementById('mainStatus');
+        const tokenCount = document.getElementById('tokenCount');
+        
+        let totalTokens = 0;
+        
+        function resetStatus() {
+            totalTokens = 0;
+            statusCard.className = 'status-card';
+            statusIcon.textContent = '⏳';
+            mainStatus.textContent = 'Starting migration...';
+            tokenCount.textContent = '';
+            tokenCount.classList.remove('has-tokens');
+        }
+        
+        function setRunningStatus(message) {
+            statusCard.className = 'status-card running';
+            statusIcon.textContent = '🔄';
+            mainStatus.textContent = message || 'Migration in progress...';
+        }
+        
+        function setCompleteStatus(tokens) {
+            statusCard.className = 'status-card success';
+            statusIcon.textContent = '✅';
+            mainStatus.textContent = 'Migration Complete!';
+            if (tokens) {
+                tokenCount.textContent = `Tokens used: ${tokens.toLocaleString()}`;
+                tokenCount.classList.add('has-tokens');
+            }
+        }
+        
+        function setErrorStatus(message) {
+            statusCard.className = 'status-card error';
+            statusIcon.textContent = '❌';
+            mainStatus.textContent = message || 'Migration Failed';
+        }
+        
+        function extractTokens(message) {
+            // Extract token count from "Tokens used: 11,659" pattern
+            const match = message.match(/Tokens used[\s:]+([\d,]+)/i);
+            if (match) {
+                return parseInt(match[1].replace(/,/g, ''), 10);
+            }
+            return null;
+        }
+        
+        // File drop handling
+        dropZone.addEventListener('click', () => fileInput.click());
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length) handleFile(files[0]);
+        });
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) handleFile(e.target.files[0]);
+        });
+        
+        function handleFile(file) {
+            if (!file.name.endsWith('.zip')) {
+                log('error', 'Only ZIP files are supported');
+                return;
+            }
+            uploadedFile = file;
+            fileName.textContent = file.name;
+            fileInfo.classList.add('visible');
+            updateConvertButton();
+        }
+        
+        targetSelect.addEventListener('change', updateConvertButton);
+        
+        function updateConvertButton() {
+            convertBtn.disabled = !(uploadedFile && targetSelect.value);
+        }
+        
+        // Logging
+        function log(level, message) {
+            const timestamp = new Date().toLocaleTimeString();
+            const line = document.createElement('div');
+            line.className = 'console-line';
+            
+            // Check if it's a section header
+            if (message.includes('[1/6]') || message.includes('[2/6]') || 
+                message.includes('[3/6]') || message.includes('[4/6]') || 
+                message.includes('[5/6]') || message.includes('[6/6]')) {
+                line.className += ' section';
+            }
+            
+            line.innerHTML = `
+                <span class="timestamp">${timestamp}</span>
+                <span class="level ${level}">[${level.toUpperCase()}]</span>
+                <span class="message">${escapeHtml(message)}</span>
+            `;
+            consoleDiv.appendChild(line);
+            consoleDiv.scrollTop = consoleDiv.scrollHeight;
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        function clearConsole() {
+            consoleDiv.innerHTML = '';
+        }
+        
+        // Convert button
+        convertBtn.addEventListener('click', async () => {
+            if (!uploadedFile || !targetSelect.value) return;
+            
+            clearConsole();
+            setStatus('running', 'Uploading...');
+            convertBtn.disabled = true;
+            downloadBtn.classList.remove('visible');
+            
+            try {
+                // Upload file
+                const formData = new FormData();
+                formData.append('file', uploadedFile);
+                
+                log('info', 'Uploading ZIP file...');
+                const uploadRes = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const uploadData = await uploadRes.json();
+                if (!uploadData.success) {
+                    throw new Error(uploadData.error || 'Upload failed');
+                }
+                
+                jobId = uploadData.job_id;
+                sourcePath = uploadData.source_path;
+                log('success', `Uploaded: ${uploadData.message}`);
+                
+                // Start conversion
+                log('info', `Starting migration to ${targetSelect.options[targetSelect.selectedIndex].text}...`);
+                
+                const convertRes = await fetch('/api/convert', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        source_path: sourcePath,
+                        target: targetSelect.value,
+                        job_id: jobId
+                    })
+                });
+                
+                const convertData = await convertRes.json();
+                if (!convertData.success) {
+                    throw new Error(convertData.error || 'Conversion failed');
+                }
+                
+                // Connect to progress stream
+                connectProgressStream(jobId);
+                
+            } catch (err) {
+                log('error', err.message);
+                setStatus('error', 'Failed');
+                convertBtn.disabled = false;
+            }
+        });
+        
+        function connectProgressStream(jobId) {
+            setRunningStatus();
+            resetStatus();
+            
+            const evtSource = new EventSource(`/api/progress/${jobId}`);
+            
+            evtSource.onmessage = (e) => {
+                try {
+                    const data = JSON.parse(e.data);
+                    
+                    if (data.type === 'heartbeat') return;
+                    
+                    // Log ALL messages to console
+                    const msg = data.message || '';
+                    
+                    // Check for MIGRATION COMPLETE
+                    if (msg.includes('MIGRATION COMPLETE')) {
+                        const tokens = extractTokens(msg);
+                        setCompleteStatus(tokens || totalTokens);
+                        log('success', msg);
+                    }
+                    // Extract tokens
+                    else if (msg.includes('Tokens used')) {
+                        const tokens = extractTokens(msg);
+                        if (tokens) totalTokens = tokens;
+                        log('info', msg);
+                    }
+                    // Progress indicators
+                    else if (msg.includes('[1/6]')) log('info', '📥 ' + msg);
+                    else if (msg.includes('[2/6]')) log('info', '🔍 ' + msg);
+                    else if (msg.includes('[3/6]')) log('info', '🔄 ' + msg);
+                    else if (msg.includes('[4/6]')) log('info', '✓ ' + msg);
+                    else if (msg.includes('[5/6]')) log('info', '👁 ' + msg);
+                    else if (msg.includes('[6/6]')) log('info', '📦 ' + msg);
+                    // Log everything else as-is
+                    else {
+                        log('info', msg);
+                    }
+                    
+                    // Handle completion
+                    if (data.type === 'complete') {
+                        setCompleteStatus(totalTokens);
+                        log('success', data.message || 'Migration complete!');
+                        downloadBtn.classList.add('visible');
+                        evtSource.close();
+                        convertBtn.disabled = false;
+                    }
+                    // Handle errors
+                    else if (data.type === 'error') {
+                        setErrorStatus(data.message || 'Migration failed');
+                        log('error', data.message || 'Migration failed');
+                        evtSource.close();
+                        convertBtn.disabled = false;
+                    }
+                } catch (err) {
+                    console.error('Error parsing SSE data:', err, e.data);
+                }
+            };
+            
+            evtSource.onerror = (err) => {
+                console.error('SSE Error:', err);
+                evtSource.close();
+            };
+        }
+        
+        function setStatus(state, text) {
+            statusDot.className = 'status-dot ' + state;
+            statusText.textContent = text;
+        }
+        
+        // Download button
+        downloadBtn.addEventListener('click', () => {
+            if (jobId) {
+                window.location.href = `/api/download/${jobId}`;
+            }
+        });
+    </script>
+</body>
+</html>
