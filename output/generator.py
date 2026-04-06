@@ -294,12 +294,21 @@ class OutputGenerator:
             if not result.converted_code:
                 continue
             
-            # Check if content contains multiple file markers
-            if should_split_file(result.converted_code):
+            # Determine target language
+            target = result.target_language or manifest.target_language
+            language = target.value if target else "java"
+            
+            # Check if content needs splitting (multiple classes or file markers)
+            if should_split_file(result.converted_code, language):
                 log.info("Detected multi-file content, splitting...")
-                segments = splitter.split_content(
+                
+                # Determine base path for Java package structure
+                base_path = self._determine_base_path(result, manifest)
+                
+                segments = splitter.intelligent_split(
                     result.converted_code,
-                    base_language=result.target_language.value if result.target_language else "java"
+                    base_path=base_path,
+                    language=language
                 )
                 if segments:
                     # Write split files
@@ -315,6 +324,112 @@ class OutputGenerator:
             written += 1
             
         log.info("Wrote %d converted files", written)
+    
+    def _determine_base_path(self, result, manifest) -> str:
+        """
+        Determine the base path for Java package structure.
+        
+        Uses source directory structure + detected component type for intelligent
+        package organization. Ensures standard Spring Boot package conventions.
+        
+        Package mapping:
+        - Controllers → com/company/controller
+        - Services → com/company/service
+        - Entities → com/company/entity
+        - Repositories → com/company/repository
+        - DTOs → com/company/dto
+        - Utils → com/company/util
+        - Config → com/company/config
+        """
+        if not result.source_file:
+            return "com/company/app"
+        
+        src_path = Path(result.source_file.path)
+        stem = src_path.stem.lower()
+        
+        # Comprehensive keyword mapping
+        path_keywords = {
+            'controller': 'controller',
+            'controllers': 'controller',
+            'ctrl': 'controller',
+            'service': 'service',
+            'services': 'service',
+            'svc': 'service',
+            'business': 'service',
+            'bll': 'service',
+            'entity': 'entity',
+            'entities': 'entity',
+            'model': 'entity',
+            'models': 'entity',
+            'domain': 'entity',
+            'repository': 'repository',
+            'repositories': 'repository',
+            'repo': 'repository',
+            'dao': 'repository',
+            'dal': 'repository',
+            'data': 'repository',
+            'dto': 'dto',
+            'dtos': 'dto',
+            'viewmodel': 'dto',
+            'vm': 'dto',
+            'request': 'dto',
+            'response': 'dto',
+            'util': 'util',
+            'utils': 'util',
+            'helper': 'util',
+            'helpers': 'util',
+            'common': 'common',
+            'shared': 'common',
+            'config': 'config',
+            'configuration': 'config',
+            'settings': 'config',
+        }
+        
+        # Check for component type info from file_type_registry
+        detected_type = getattr(result.source_file, 'detected_component_type', None)
+        
+        type_package_map = {
+            'CONTROLLER': 'controller',
+            'SERVICE': 'service',
+            'ENTITY': 'entity',
+            'REPOSITORY': 'repository',
+            'DATA_ACCESS': 'repository',
+            'CLASS': 'util',
+            'MODULE': 'util',
+            'INTERFACE': 'common',
+            'ENUM': 'common',
+        }
+        
+        if detected_type and detected_type in type_package_map:
+            return f"com/company/{type_package_map[detected_type]}"
+        
+        # Check each path component against keywords
+        for part in src_path.parts:
+            part_lower = part.lower()
+            if part_lower in path_keywords:
+                return f"com/company/{path_keywords[part_lower]}"
+        
+        # Check filename stem for keywords
+        for keyword, pkg in path_keywords.items():
+            if keyword in stem:
+                return f"com/company/{pkg}"
+        
+        # Filename suffix checks
+        if stem.endswith('controller'):
+            return "com/company/controller"
+        elif stem.endswith('service') or stem.endswith('svc'):
+            return "com/company/service"
+        elif stem.endswith('repository') or stem.endswith('repo') or stem.endswith('dao'):
+            return "com/company/repository"
+        elif stem.endswith('dto') or stem.endswith('request') or stem.endswith('response'):
+            return "com/company/dto"
+        
+        # Final fallback - use directory name if meaningful
+        parent = src_path.parent.name.lower()
+        if parent in path_keywords:
+            return f"com/company/{path_keywords[parent]}"
+        
+        return "com/company/app"
 
     def _write_project_scaffold(
         self,

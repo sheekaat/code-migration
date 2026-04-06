@@ -434,11 +434,11 @@ if __name__ == '__main__':
     # Clean up old uploads on startup
     cleanup_old_uploads()
     
-    # Run Flask with input folder excluded from reloader
+    # Run Flask with reloader disabled to prevent interruptions during conversion
     app.run(
         debug=True,
         host='0.0.0.0',
         port=5000,
         threaded=True,
-        exclude_patterns=['*/input/*', 'input/*', 'input/']
+        use_reloader=False
     )

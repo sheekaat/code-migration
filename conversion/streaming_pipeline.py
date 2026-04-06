@@ -190,20 +190,82 @@ class StreamingConversionPipeline:
         output_path.write_text(result.converted_code, encoding='utf-8')
     
     def _determine_package_path(self, source_file: SourceFile) -> str:
-        """Determine Java package path from source file name."""
-        stem = Path(source_file.path).stem.lower()
+        """
+        Determine Java package path from source file.
+        Uses source directory structure + component type heuristics.
+        """
+        src_path = Path(source_file.path)
+        stem = src_path.stem.lower()
         
-        # Heuristic package naming based on filename
-        if 'controller' in stem:
+        # Map of source path keywords to package components
+        path_keywords = {
+            'controller': 'controller',
+            'controllers': 'controller',
+            'ctrl': 'controller',
+            'service': 'service',
+            'services': 'service',
+            'svc': 'service',
+            'business': 'service',
+            'entity': 'entity',
+            'entities': 'entity',
+            'model': 'entity',
+            'models': 'entity',
+            'domain': 'entity',
+            'repository': 'repository',
+            'repositories': 'repository',
+            'repo': 'repository',
+            'dao': 'repository',
+            'data': 'repository',
+            'dto': 'dto',
+            'dtos': 'dto',
+            'viewmodel': 'dto',
+            'util': 'util',
+            'utils': 'util',
+            'helper': 'util',
+            'helpers': 'util',
+            'common': 'common',
+            'config': 'config',
+            'configuration': 'config',
+        }
+        
+        # Check for component type from file type registry
+        detected_type = getattr(source_file, 'detected_component_type', None)
+        type_package_map = {
+            'CONTROLLER': 'controller',
+            'SERVICE': 'service',
+            'ENTITY': 'entity',
+            'REPOSITORY': 'repository',
+            'DATA_ACCESS': 'repository',
+            'CLASS': 'util',
+            'MODULE': 'util',
+        }
+        
+        if detected_type and detected_type in type_package_map:
+            return f"com/company/{type_package_map[detected_type]}"
+        
+        # Check each path component against keywords
+        for part in src_path.parts:
+            part_lower = part.lower()
+            if part_lower in path_keywords:
+                return f"com/company/{path_keywords[part_lower]}"
+        
+        # Check filename stem for keywords
+        for keyword, pkg in path_keywords.items():
+            if keyword in stem:
+                return f"com/company/{pkg}"
+        
+        # Default based on file extension/type
+        if stem.endswith('controller'):
             return "com/company/controller"
-        elif 'service' in stem or 'svc' in stem:
+        elif stem.endswith('service') or stem.endswith('svc'):
             return "com/company/service"
-        elif 'entity' in stem or 'model' in stem:
-            return "com/company/entity"
-        elif 'repo' in stem or 'dao' in stem:
+        elif stem.endswith('repository') or stem.endswith('repo') or stem.endswith('dao'):
             return "com/company/repository"
-        elif 'util' in stem or 'helper' in stem:
-            return "com/company/util"
+        
+        # Final fallback - use directory name if meaningful
+        parent = src_path.parent.name.lower()
+        if parent in path_keywords:
+            return f"com/company/{path_keywords[parent]}"
         
         return "com/company/app"
 

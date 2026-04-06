@@ -229,11 +229,19 @@ CSHARP_CONTROLLER_TO_JAVA = ConversionTemplate(
 
 ## Conversion Rules
 
+### CRITICAL: Preserve API Endpoint URLs
+- MUST keep the EXACT same URL paths from C# routes
+- Example: [Route("api/users/{id}")] → @GetMapping("/api/users/{id}")
+- Example: [HttpGet("getById/{id}")] inside [Route("api/users")] → @GetMapping("/api/users/getById/{id}")
+- Concatenate parent Route prefix with action route template
+- Do NOT change URL patterns - backward compatibility is essential
+
 ### Class Structure
 - Controller class → @RestController
-- Route attributes → @RequestMapping on class
-- Action methods → @GetMapping/@PostMapping/etc.
-- Route parameters → @PathVariable or @RequestParam
+- Route attributes → @RequestMapping on class (if base path)
+- Action methods → @GetMapping/@PostMapping/@PutMapping/@DeleteMapping with FULL path
+- Route parameters → @PathVariable with exact parameter names
+- Query parameters → @RequestParam with exact parameter names
 - Body parameters → @RequestBody
 
 ### Dependency Injection
@@ -246,11 +254,11 @@ CSHARP_CONTROLLER_TO_JAVA = ConversionTemplate(
 - JsonResult → ResponseEntity with JSON body
 - FileResult → ResponseEntity with Resource
 
-### HTTP Methods
-- HttpGet → @GetMapping
-- HttpPost → @PostMapping
-- HttpPut → @PutMapping
-- HttpDelete → @DeleteMapping
+### HTTP Methods (with FULL path preservation)
+- [HttpGet("path")] → @GetMapping("/full/path")
+- [HttpPost("path")] → @PostMapping("/full/path")
+- [HttpPut("path")] → @PutMapping("/full/path")
+- [HttpDelete("path")] → @DeleteMapping("/full/path")
 
 ### Model Binding
 - [FromBody] → @RequestBody
@@ -265,24 +273,30 @@ CSHARP_CONTROLLER_TO_JAVA = ConversionTemplate(
 ### Async
 - async Task<T> → CompletableFuture<T> or just T (Spring handles async)
 
+### Java Naming Standards
+- Class name: PascalCase ending with Controller (e.g., UserController)
+- Method names: camelCase (e.g., getUserById)
+- Package: com.company.controller (use lowercase, dot-separated)
+
 ## Output Format
 Return ONLY the complete Java controller:
-1. Package declaration
+1. Package declaration: package com.company.controller;
 2. Imports (spring.web.bind.annotation, etc.)
-3. @RestController class
-4. @RequestMapping base path
+3. @RestController class with PascalCase name
+4. @RequestMapping base path (if applicable)
 5. Constructor with dependencies
-6. Endpoint methods with proper annotations
+6. Endpoint methods with EXACT URL paths from C#
 7. ResponseEntity returns
 
 No markdown fences. No explanations.
 """,
     validation_rules=[
         "Must have @RestController annotation",
-        "Must use @GetMapping/@PostMapping for endpoints",
+        "Must use @GetMapping/@PostMapping with full paths",
+        "Must preserve original API URL patterns exactly",
         "Must use ResponseEntity for responses",
-        "Must convert async/await properly",
-        "Must preserve all route parameters",
+        "Must use PascalCase class name ending with Controller",
+        "Must use camelCase method names",
     ],
 )
 
@@ -304,6 +318,13 @@ CSHARP_ENTITY_TO_JAVA = ConversionTemplate(
 
 ## Conversion Rules
 
+### CRITICAL: Java Naming Standards
+- Class name: PascalCase (e.g., CustomerOrder, UserProfile)
+- Field names: camelCase (e.g., firstName, orderDate)
+- Package: com.company.entity (lowercase, singular)
+- Table name: snake_case matching database table (use @Table(name="..."))
+- Column names: snake_case matching database columns (use @Column(name="..."))
+
 ### Class Structure
 - public class → @Entity public class
 - Inherit from base → extend or embed
@@ -316,6 +337,7 @@ CSHARP_ENTITY_TO_JAVA = ConversionTemplate(
 - [MaxLength] → @Column(length=X)
 - [ForeignKey] → @ManyToOne/@OneToMany with @JoinColumn
 - [NotMapped] → @Transient
+- Auto-properties with private setter → @Column(updatable=false) or custom setter
 
 ### Data Types
 - int → int or Integer
@@ -326,6 +348,7 @@ CSHARP_ENTITY_TO_JAVA = ConversionTemplate(
 - decimal → BigDecimal
 - Guid → UUID
 - byte[] → byte[] or Blob
+- Nullable<T> → Optional<T> or boxed type
 
 ### Relationships
 - ICollection<T> → List<T> or Set<T>
@@ -339,13 +362,18 @@ CSHARP_ENTITY_TO_JAVA = ConversionTemplate(
 - @AllArgsConstructor
 - @Builder for builder pattern
 
+### Table/Column Name Preservation
+- If C# entity maps to specific database table, use @Table(name="exact_table_name")
+- If C# property maps to specific column, use @Column(name="exact_column_name")
+- Preserve exact database naming for backward compatibility
+
 ## Output Format
 Return ONLY the complete Java entity:
-1. Package declaration
+1. Package declaration: package com.company.entity;
 2. Imports (javax.persistence, lombok if used)
-3. @Entity class
+3. @Entity @Table class with PascalCase name
 4. @Id @GeneratedValue primary key
-5. Fields with @Column annotations
+5. Fields with proper annotations
 6. Relationship annotations
 7. Getters/setters (or @Data)
 
@@ -356,7 +384,9 @@ No markdown fences. No explanations.
         "Must have @Id field",
         "Must convert DataAnnotations to JPA annotations",
         "Must use proper relationship mappings",
-        "Must use Java naming conventions",
+        "Must use PascalCase class names",
+        "Must use camelCase field names",
+        "Must use lowercase package names",
     ],
 )
 

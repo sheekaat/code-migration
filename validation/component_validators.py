@@ -99,6 +99,60 @@ REACT_COMPONENT_RULES = ComponentValidationSuite(
 )
 
 
+JAVA_NAMING_RULES = ComponentValidationSuite(
+    component_type=ComponentType.CLASS,
+    target_language=TargetLanguage.JAVA_SPRING,
+    rules=[
+        ValidationRule(
+            name="package_lowercase",
+            description="Package names must be lowercase",
+            check=lambda c: re.search(r'package\s+([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)', c) is not None,
+            severity="error",
+            suggestion="Package names must be lowercase (e.g., package com.company.controller;)",
+        ),
+        ValidationRule(
+            name="class_pascalcase",
+            description="Class name must use PascalCase",
+            check=lambda c: re.search(r'public\s+(?:abstract\s+|final\s+)?class\s+([A-Z][A-Za-z0-9_]*)', c) is not None,
+            severity="error",
+            suggestion="Class name must start with uppercase letter and use PascalCase (e.g., UserController)",
+        ),
+        ValidationRule(
+            name="class_suffix_controller",
+            description="Controller class should end with Controller",
+            check=lambda c: not ("@RestController" in c or "@Controller" in c) or re.search(r'class\s+\w+Controller\s', c) is not None,
+            severity="warning",
+            suggestion="Controller class should end with 'Controller' suffix (e.g., UserController)",
+        ),
+        ValidationRule(
+            name="class_suffix_service",
+            description="Service class should end with Service",
+            check=lambda c: "@Service" not in c or re.search(r'class\s+\w+Service\s', c) is not None,
+            severity="warning",
+            suggestion="Service class should end with 'Service' suffix (e.g., OrderService)",
+        ),
+        ValidationRule(
+            name="method_camelcase",
+            description="Method names should use camelCase",
+            check=lambda c: all(
+                re.match(r'[a-z][a-zA-Z0-9_]*', name) is not None
+                for name in re.findall(r'(?:public|private|protected)\s+(?:static\s+)?(?:\w+(?:<[^>]+>)?\s+)?([a-z][a-zA-Z0-9_]*)\s*\(', c)
+                if name not in ['main', 'if', 'for', 'while']
+            ),
+            severity="warning",
+            suggestion="Method names should use camelCase starting with lowercase (e.g., getUserById)",
+        ),
+        ValidationRule(
+            name="field_camelcase",
+            description="Field names should use camelCase",
+            check=lambda c: len(re.findall(r'(?:private|protected|public)\s+\w+(?:<[^>]+>)?\s+([A-Z][a-zA-Z0-9_]*)\s*[;=]', c)) == 0,
+            severity="warning",
+            suggestion="Field names should use camelCase (e.g., firstName, not FirstName)",
+        ),
+    ],
+)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # JAVA SPRING SERVICE VALIDATION
 # ═══════════════════════════════════════════════════════════════════════════
