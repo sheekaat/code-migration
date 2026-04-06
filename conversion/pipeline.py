@@ -12,6 +12,8 @@ from shared.models import (
 from shared.config import get_logger, load_config
 from conversion.rule_engine.engine import RuleEngine
 from conversion.llm_converter.converter import LLMConverter
+from ingestion.file_type_registry import detect_file_type, ComponentType
+from conversion.component_templates import get_conversion_template
 
 log = get_logger(__name__)
 
@@ -64,6 +66,17 @@ class ConversionPipeline:
 
         result: ConversionResult
 
+        # Detect file type and get component-specific template
+        file_type_info = detect_file_type(sf.path, sf.raw_content)
+        primary_component = file_type_info.components[0] if file_type_info.components else None
+        
+        if primary_component:
+            log.info("  Detected: %s -> %s (conf=%.2f)",
+                primary_component.type.name,
+                primary_component.suggested_target_type,
+                primary_component.conversion_confidence
+            )
+
         if sf.complexity_tier == ComplexityTier.GREEN and self._rule_first:
             # Rule engine only
             result = self.rule_engine.convert(sf, target)
@@ -76,11 +89,12 @@ class ConversionPipeline:
             result = self.rule_engine.convert(sf, target)
             if result.confidence < self._threshold:
                 log.debug("  Rule engine insufficient, escalating to LLM")
-                result = self.llm_converter.convert(sf, target, prior_result=result)
+                result = self.llm_converter.convert(sf, target, prior_result=result, 
+                                                     component_info=primary_component)
             return result
 
-        # RED tier or XAML — full LLM
-        result = self.llm_converter.convert(sf, target)
+        # RED tier or XAML — full LLM with component template
+        result = self.llm_converter.convert(sf, target, component_info=primary_component)
 
         # Flag for human review if still low confidence
         if result.confidence < self._threshold:

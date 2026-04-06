@@ -8,13 +8,15 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Optional
+import fnmatch
+from typing import Optional, List
 
 from shared.models import (
     SourceFile, SourceLanguage, TargetLanguage,
     WorkspaceManifest, ComplexityTier,
 )
 from shared.config import get_logger
+from ingestion.file_type_registry import detect_file_type, FileTypeInfo
 
 log = get_logger(__name__)
 
@@ -51,19 +53,37 @@ _SOURCE_LANGUAGE_TARGETS: dict[SourceLanguage, TargetLanguage] = {
 class RepoCrawler:
     """Walks a repository and produces a WorkspaceManifest."""
 
-    def __init__(self, repo_path: str, target_language: Optional[TargetLanguage] = None):
+    def __init__(self, repo_path: str, target_language: Optional[TargetLanguage] = None, skip_patterns: Optional[List[str]] = None):
         self.repo_path = Path(repo_path).resolve()
         self.target_language = target_language
+        self.skip_patterns = skip_patterns or []
+
+    def _should_skip(self, path: Path) -> bool:
+        """Check if path matches any skip pattern."""
+        try:
+            rel_path = str(path.relative_to(self.repo_path))
+        except ValueError:
+            # path is not under repo_path
+            rel_path = str(path)
+        
+        for pattern in self.skip_patterns:
+            # Match against full relative path or just filename
+            if fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(path.name, pattern):
+                log.info("[SKIP] %s matches pattern: %s", rel_path, pattern)
+                return True
+        return False
 
     def crawl(self) -> WorkspaceManifest:
-        log.info("Crawling repo: %s", self.repo_path)
+        log.info("Crawling repo: %s (skip patterns: %s)", self.repo_path, self.skip_patterns)
         files: list[SourceFile] = []
 
         for root, dirs, filenames in os.walk(self.repo_path):
             # Prune ignored directories in-place
-            dirs[:] = [d for d in dirs if d not in _IGNORE_DIRS]
+            dirs[:] = [d for d in dirs if d not in _IGNORE_DIRS and not self._should_skip(Path(root) / d)]
             for fname in filenames:
                 fpath = Path(root) / fname
+                if self._should_skip(fpath):
+                    continue
                 sf = self._process_file(fpath)
                 if sf:
                     files.append(sf)
@@ -103,6 +123,19 @@ class RepoCrawler:
 
         lines = raw.splitlines()
         rel_path = str(path.relative_to(self.repo_path))
+        
+        # Detect file type and components
+        file_type_info = detect_file_type(rel_path, raw)
+        primary_component = file_type_info.components[0] if file_type_info.components else None
+        
+        # Log detected components
+        if primary_component:
+            log.debug("  %s: detected as %s (category: %s)",
+                rel_path,
+                primary_component.type.name,
+                file_type_info.file_category.name
+            )
+        
         return SourceFile(
             path=rel_path,
             language=lang,

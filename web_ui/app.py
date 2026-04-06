@@ -24,6 +24,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from shared.models import TargetLanguage
 from shared.config import get_logger, load_config
 from orchestration.pipeline import MigrationOrchestrator
+from conversion.streaming_pipeline import StreamingConversionPipeline
+from ingestion.crawler import RepoCrawler
+from analysis.engine import analyse
+from validation.runner import ValidationRunner
+from output.generator import OutputGenerator
+from pathlib import Path
 
 log = get_logger(__name__)
 app = Flask(__name__, template_folder='templates', static_folder='static')
@@ -70,8 +76,12 @@ class ProgressCapture:
         pass
 
 
-def run_migration(repo_path: str, target: str, job_id: str):
-    """Run migration in background thread with progress capture."""
+def run_migration(repo_path: str, target: str, job_id: str, use_streaming: bool = True, skip_patterns: list = None):
+    """Run migration in background thread with progress capture.
+    
+    Uses streaming mode for large repos to save memory.
+    """
+    skip_patterns = skip_patterns or []
     log_handler = None
     try:
         queue = progress_queues.get(job_id)
@@ -82,30 +92,41 @@ def run_migration(repo_path: str, target: str, job_id: str):
         if queue:
             log_handler = QueueLogHandler(queue)
             log_handler.setFormatter(logging.Formatter('%(name)s: %(message)s'))
-            # Add ONLY to root logger - child loggers will propagate up
             root_logger = logging.getLogger()
             if not any(isinstance(h, QueueLogHandler) for h in root_logger.handlers):
                 root_logger.addHandler(log_handler)
-                log.info("Added QueueLogHandler to root logger")
-            # Note: Don't add to specific loggers - they propagate to root!
         
-        # Create orchestrator and run
+        # Load config and setup
         config = load_config()
-        orchestrator = MigrationOrchestrator(config)
-        
         target_enum = TargetLanguage(target.lower())
-        result_dir = orchestrator.run(repo_path, target_language=target_enum)
+        output_base = Path(__file__).parent.parent / 'output'
+        output_base.mkdir(parents=True, exist_ok=True)
+        
+        # Determine if we should use streaming (for large repos or always)
+        repo_path_obj = Path(repo_path)
+        file_count = len(list(repo_path_obj.rglob('*')))
+        log.info(f"Repository has {file_count} items, using {'streaming' if use_streaming else 'batch'} mode")
+        
+        if use_streaming:
+            result_dir = _run_streaming_migration(
+                repo_path, target_enum, config, output_base, queue, job_id, skip_patterns
+            )
+        else:
+            orchestrator = MigrationOrchestrator(config)
+            result_dir = orchestrator.run(repo_path, target_language=target_enum, skip_patterns=skip_patterns)
         
         if queue:
             queue.put({
                 'type': 'complete',
                 'status': 'success',
-                'output_dir': result_dir,
+                'output_dir': str(result_dir),
                 'message': f'Migration complete! Output: {result_dir}'
             })
             
     except Exception as e:
         log.error("Migration failed: %s", e)
+        import traceback
+        log.error(traceback.format_exc())
         if queue:
             queue.put({
                 'type': 'error',
@@ -118,7 +139,88 @@ def run_migration(repo_path: str, target: str, job_id: str):
             root_logger = logging.getLogger()
             if log_handler in root_logger.handlers:
                 root_logger.removeHandler(log_handler)
-                log.info("Removed QueueLogHandler from root logger")
+
+
+def _run_streaming_migration(repo_path, target_enum, config, output_base, queue, job_id, skip_patterns=None):
+    """Run streaming migration for memory efficiency."""
+    from accuracy.loop import SelfHealingAccuracyLoop
+    
+    skip_patterns = skip_patterns or []
+    
+    # Layer 1: Ingestion
+    log.info("[1/6] Ingesting repository...")
+    if skip_patterns:
+        log.info(f"  Skip patterns: {skip_patterns}")
+    if queue:
+        queue.put({'type': 'status', 'message': '[1/6] Ingesting repository...'})
+    
+    crawler = RepoCrawler(repo_path, target_language=target_enum, skip_patterns=skip_patterns)
+    manifest = crawler.crawl()
+    log.info(f"  Found {len(manifest.files)} files")
+    
+    # Layer 2: Analysis
+    log.info("[2/6] Running analysis engine...")
+    if queue:
+        queue.put({'type': 'status', 'message': '[2/6] Analyzing files...'})
+    
+    manifest = analyse(manifest, config)
+    green = sum(1 for f in manifest.files if f.complexity_tier.value == 'green')
+    amber = sum(1 for f in manifest.files if f.complexity_tier.value == 'amber')
+    red = sum(1 for f in manifest.files if f.complexity_tier.value == 'red')
+    log.info(f"  Tiers: green={green}, amber={amber}, red={red}")
+    
+    # Layer 3: Streaming Conversion
+    log.info("[3/6] Running streaming conversion pipeline...")
+    if queue:
+        queue.put({'type': 'status', 'message': '[3/6] Converting files (streaming)...'})
+    
+    streaming_pipeline = StreamingConversionPipeline(config)
+    output_dir = output_base / f'migration_{job_id}'
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Convert files one at a time
+    results = []
+    for result in streaming_pipeline.convert_manifest_streaming(manifest, output_dir):
+        results.append(result)
+        if queue and result.source_file:
+            status = "✓" if result.confidence >= 0.75 else "⚠"
+            queue.put({
+                'type': 'info',
+                'message': f"  {status} Converted: {result.source_file.path} (conf={result.confidence:.2f})"
+            })
+    
+    manifest.conversion_results = results
+    manifest.stats["conversion"] = streaming_pipeline.get_stats()
+    
+    # Layer 4: Validation (file by file)
+    log.info("[4/6] Running validation...")
+    if queue:
+        queue.put({'type': 'status', 'message': '[4/6] Validating conversions...'})
+    
+    validator = ValidationRunner(config)
+    reports = validator.validate_manifest(manifest)
+    passed = sum(1 for r in reports if r.overall_passed)
+    log.info(f"  Validation: {passed}/{len(reports)} passed")
+    
+    # Layer 5: Accuracy Loop (for files that need improvement)
+    if config.get('accuracy', {}).get('enabled', True):
+        log.info("[5/6] Running accuracy improvements...")
+        if queue:
+            queue.put({'type': 'status', 'message': '[5/6] Improving accuracy...'})
+        
+        accuracy_loop = SelfHealingAccuracyLoop(config)
+        accuracy_stats = accuracy_loop.run_for_manifest(manifest)
+        log.info(f"  Accuracy: {accuracy_stats.get('pass_rate', '0%')} pass rate")
+    
+    # Layer 6: Generate final report
+    log.info("[6/6] Generating output report...")
+    if queue:
+        queue.put({'type': 'status', 'message': '[6/6] Generating output report...'})
+    
+    generator = OutputGenerator(config)
+    generator._write_reports(manifest, reports, output_dir)
+    
+    return output_dir
 
 
 @app.route('/')
@@ -133,7 +235,7 @@ def index():
 
 @app.route('/api/upload', methods=['POST'])
 def upload():
-    """Handle ZIP upload and extract."""
+    """Handle ZIP upload and extract to input/ folder."""
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided'}), 400
     
@@ -145,32 +247,42 @@ def upload():
         return jsonify({'error': 'Only ZIP files are supported'}), 400
     
     try:
-        # Create temp directory
-        temp_dir = tempfile.mkdtemp(prefix='migration_upload_')
-        zip_path = Path(temp_dir) / 'upload.zip'
+        # Define input folder (relative to project root)
+        input_dir = Path(__file__).parent.parent / 'input'
+        
+        # Clear existing input folder contents
+        if input_dir.exists():
+            for item in input_dir.iterdir():
+                if item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+                else:
+                    item.unlink()
+            log.info("Cleared existing input folder")
+        else:
+            input_dir.mkdir(parents=True, exist_ok=True)
         
         # Save uploaded file
+        zip_path = input_dir / 'upload.zip'
         file.save(zip_path)
         
-        # Extract
-        extract_dir = Path(temp_dir) / 'source'
+        # Extract to input folder
         with zipfile.ZipFile(zip_path, 'r') as z:
-            z.extractall(extract_dir)
+            z.extractall(input_dir)
         
         # Clean up zip
         zip_path.unlink()
         
         # Find the actual source folder (handle nested zips)
-        source_path = extract_dir
-        items = list(extract_dir.iterdir())
-        if len(items) == 1 and items[0].is_dir():
+        source_path = input_dir
+        items = [i for i in input_dir.iterdir() if i.is_dir()]
+        if len(items) == 1:
             source_path = items[0]
         
         return jsonify({
             'success': True,
-            'job_id': Path(temp_dir).name,
+            'job_id': f'job_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
             'source_path': str(source_path),
-            'temp_dir': temp_dir,
+            'input_dir': str(input_dir),
             'message': f'Uploaded and extracted: {file.filename}'
         })
         
@@ -186,6 +298,9 @@ def convert():
     source_path = data.get('source_path')
     target = data.get('target')
     job_id = data.get('job_id')
+    skip_patterns = data.get('skip_patterns', [])
+    
+    log.info(f"[CONVERT] Received skip_patterns: {skip_patterns}")
     
     if not all([source_path, target, job_id]):
         return jsonify({'error': 'Missing required fields'}), 400
@@ -193,14 +308,18 @@ def convert():
     if target not in ['java_spring', 'react_js']:
         return jsonify({'error': 'Invalid target language'}), 400
     
+    # Clear output folder (keep Python files)
+    clear_output_folder()
+    
     # Create progress queue
     queue = Queue()
     progress_queues[job_id] = queue
     
     # Start migration in background thread
+    log.info(f"[CONVERT] Starting thread with skip_patterns: {skip_patterns}")
     thread = threading.Thread(
         target=run_migration,
-        args=(source_path, target, job_id)
+        args=(source_path, target, job_id, True, skip_patterns)
     )
     thread.daemon = True
     thread.start()
@@ -248,32 +367,57 @@ def progress(job_id):
 
 @app.route('/api/download/<job_id>')
 def download(job_id):
-    """Download converted output as ZIP."""
-    # Find output directory
-    temp_dir = Path(tempfile.gettempdir()) / job_id
-    source_path = temp_dir / 'source'
+    """Download converted output as ZIP from output/ folder."""
+    # Find latest migration output
+    output_base = Path(__file__).parent.parent / 'output'
+    output_dirs = list(output_base.glob(f'migration_*'))
     
-    # Look for migration output
-    output_dirs = list(Path('output').glob(f'migration_*'))
-    if output_dirs:
-        latest = max(output_dirs, key=lambda p: p.stat().st_mtime)
-        
-        # Create zip of output
-        zip_path = temp_dir / 'converted.zip'
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
-            for file_path in latest.rglob('*'):
-                if file_path.is_file():
-                    z.write(file_path, file_path.relative_to(latest))
-        
-        return Response(
-            zip_path.read_bytes(),
-            mimetype='application/zip',
-            headers={
-                'Content-Disposition': f'attachment; filename=converted_{target}.zip'
-            }
-        )
+    if not output_dirs:
+        return jsonify({'error': 'No migration output found'}), 404
     
-    return jsonify({'error': 'Output not found'}), 404
+    latest = max(output_dirs, key=lambda p: p.stat().st_mtime)
+    
+    # Create temp zip
+    temp_dir = Path(tempfile.gettempdir())
+    zip_path = temp_dir / f'converted_{job_id}.zip'
+    
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
+        for file_path in latest.rglob('*'):
+            if file_path.is_file():
+                z.write(file_path, file_path.relative_to(latest))
+    
+    return Response(
+        zip_path.read_bytes(),
+        mimetype='application/zip',
+        headers={
+            'Content-Disposition': f'attachment; filename=converted_{job_id}.zip'
+        }
+    )
+
+
+def clear_output_folder():
+    """Clear output/ folder contents but keep Python files."""
+    output_base = Path(__file__).parent.parent / 'output'
+    if not output_base.exists():
+        output_base.mkdir(parents=True, exist_ok=True)
+        return
+    
+    for item in output_base.iterdir():
+        # Skip Python files
+        if item.is_file() and item.suffix == '.py':
+            continue
+        # Skip __pycache__ directories
+        if item.is_dir() and item.name == '__pycache__':
+            continue
+        try:
+            if item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+                log.info(f"Removed output directory: {item.name}")
+            else:
+                item.unlink()
+                log.info(f"Removed output file: {item.name}")
+        except Exception as e:
+            log.warning(f"Could not remove {item}: {e}")
 
 
 def cleanup_old_uploads():
@@ -290,5 +434,11 @@ if __name__ == '__main__':
     # Clean up old uploads on startup
     cleanup_old_uploads()
     
-    # Run Flask
-    app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)
+    # Run Flask with input folder excluded from reloader
+    app.run(
+        debug=True,
+        host='0.0.0.0',
+        port=5000,
+        threaded=True,
+        exclude_patterns=['*/input/*', 'input/*', 'input/']
+    )

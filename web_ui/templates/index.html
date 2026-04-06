@@ -352,6 +352,14 @@
             </div>
             
             <div class="form-group">
+                <label for="skipPatterns">Skip Patterns (optional)</label>
+                <input type="text" id="skipPatterns" placeholder="*Test*, *.spec.cs, Migrations/">
+                <small style="color: #8b949e; display: block; margin-top: 0.25rem;">
+                    Comma-separated patterns. Examples: <code>*Test*</code>, <code>*.spec.cs</code>, <code>Migrations/</code>
+                </small>
+            </div>
+            
+            <div class="form-group">
                 <label>Source Code (ZIP)</label>
                 <div class="file-drop-zone" id="dropZone">
                     <div class="icon">📦</div>
@@ -407,6 +415,7 @@
         const fileName = document.getElementById('fileName');
         const convertBtn = document.getElementById('convertBtn');
         const targetSelect = document.getElementById('target');
+        const skipPatternsInput = document.getElementById('skipPatterns');
         const consoleDiv = document.getElementById('console');
         const statusDot = document.getElementById('statusDot');
         const statusText = document.getElementById('statusText');
@@ -561,13 +570,24 @@
                 // Start conversion
                 log('info', `Starting migration to ${targetSelect.options[targetSelect.selectedIndex].text}...`);
                 
+                // Parse skip patterns
+                const skipPatterns = skipPatternsInput.value
+                    .split(',')
+                    .map(p => p.trim())
+                    .filter(p => p.length > 0);
+                
+                if (skipPatterns.length > 0) {
+                    log('info', `Skip patterns: ${skipPatterns.join(', ')}`);
+                }
+                
                 const convertRes = await fetch('/api/convert', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         source_path: sourcePath,
                         target: targetSelect.value,
-                        job_id: jobId
+                        job_id: jobId,
+                        skip_patterns: skipPatterns
                     })
                 });
                 

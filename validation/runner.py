@@ -16,6 +16,8 @@ from shared.models import (
     ConversionResult, ConversionStatus, TargetLanguage, WorkspaceManifest,
 )
 from shared.config import get_logger
+from validation.component_validators import validate_component
+from ingestion.file_type_registry import detect_file_type
 
 log = get_logger(__name__)
 
@@ -204,6 +206,10 @@ class ValidationRunner:
         code     = result.converted_code
         target   = result.target_language
         source   = result.source_file.raw_content if result.source_file else ""
+        
+        # Detect component type for targeted validation
+        file_type_info = detect_file_type(result.source_file.path, source)
+        primary_component = file_type_info.components[0] if file_type_info.components else None
 
         # 1. Syntax check
         syntax_errors = self.syntax_checker.check(code, target)
@@ -220,7 +226,20 @@ class ValidationRunner:
         # 3. Semantic diff
         report.semantic_issues = self.semantic_diff.diff(source, code, target)
 
-        # 4. Confidence gate
+        # 4. Component-specific validation
+        if primary_component:
+            component_issues = validate_component(
+                primary_component.type,
+                target,
+                code
+            )
+            for issue in component_issues:
+                if issue['severity'] == 'error':
+                    report.compile_errors.append(f"[{issue['rule']}] {issue['description']}")
+                else:
+                    report.semantic_issues.append(f"[{issue['rule']}] {issue['description']}")
+
+        # 5. Confidence gate
         report.overall_passed = (
             report.compile_passed
             and len(report.semantic_issues) == 0

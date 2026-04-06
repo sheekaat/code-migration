@@ -23,6 +23,8 @@ from shared.models import (
     ComplexityTier,
 )
 from shared.config import get_logger
+from conversion.component_templates import get_conversion_template
+from ingestion.file_type_registry import ComponentInfo
 
 log = get_logger(__name__)
 
@@ -60,6 +62,14 @@ _JAVA_SPRING_SPECIFICS = """
 - Exceptions: throw custom RuntimeException subclasses
 - Persistence: Spring Data JPA with @Entity, @Repository
 - Use Lombok @Data, @Builder, @NoArgsConstructor where appropriate
+
+## Business Logic Translation Rules
+- Preserve ALL business rules exactly — don't simplify conditional logic
+- Convert all validation rules to bean validation annotations or explicit checks
+- Maintain exact calculation logic — don't optimize or change math operations
+- Preserve error handling flow — convert VB6 On Error to try/catch with same behavior
+- Keep transaction boundaries — use @Transactional for atomic operations
+- Preserve data access patterns — convert ADODB to JPA but keep query logic
 """
 
 _REACT_SPECIFICS = """
@@ -71,6 +81,14 @@ _REACT_SPECIFICS = """
 - API calls: async/await with fetch or axios inside useEffect
 - Styling: CSS modules or Tailwind utility classes
 - No class components — functional only
+
+## Business Logic Translation Rules
+- Preserve ALL business rules exactly — don't simplify conditional logic
+- Maintain exact calculation logic in event handlers
+- Preserve form validation rules exactly
+- Keep data transformation logic — don't optimize unless obvious
+- Preserve conditional rendering logic based on state
+- Maintain data flow patterns — convert VB6 data binding to React state
 """
 
 _TARGET_SPECIFICS: dict[TargetLanguage, str] = {
@@ -90,10 +108,20 @@ _SOURCE_HINTS: dict[SourceLanguage, str] = {
 - VB6 forms → React functional components
 - Form_Load → useEffect([], init)
 - Global variables → useState or useContext
-- ADODB Recordset → fetch() API calls to backend
-- VB6 error handling (On Error GoTo) → try/catch
+- ADODB Recordset → fetch() API calls to backend (keep query logic exact)
+- VB6 error handling (On Error GoTo) → try/catch with EXACT same behavior
 - MsgBox → custom Modal component or window.alert
 - COM object calls → REST API calls (add TODO markers)
+
+## Business Logic Preservation (CRITICAL)
+- Preserve ALL If/Then/Else logic exactly — don't simplify
+- Keep For/While loop boundaries and step values exact
+- Preserve ALL variable assignments and calculations
+- Maintain ADODB Recordset operations (MoveFirst, MoveNext, EOF) in converted form
+- Keep transaction begin/commit/rollback logic
+- Preserve ALL validation checks (field length, required, format)
+- Convert Date type to proper date handling (not string)
+- Maintain Currency/Decimal precision in calculations
 """,
     SourceLanguage.CSHARP: """
 ## C# Specific Instructions
@@ -196,10 +224,12 @@ class LLMConverter:
         sf: SourceFile,
         target: TargetLanguage,
         prior_result: Optional[ConversionResult] = None,
+        component_info: Optional[ComponentInfo] = None,
     ) -> ConversionResult:
         """
         Convert a source file using the LLM.
         If prior_result exists (from rule engine), refines it instead.
+        If component_info exists, uses component-specific template.
         """
         source_code = prior_result.converted_code if (
             prior_result and prior_result.converted_code
@@ -233,6 +263,7 @@ class LLMConverter:
                 source_file=sf,
                 target=target,
                 context_summary=context_summary,
+                component_info=component_info,
             )
             converted_parts.append(converted)
             total_tokens += tokens
@@ -277,7 +308,7 @@ class LLMConverter:
             target_specifics=_TARGET_SPECIFICS.get(target, ""),
         ) + _SOURCE_HINTS.get(sf.language, "")
 
-    def _convert_chunk(
+    def _build_generic_prompt(
         self,
         chunk: str,
         chunk_index: int,
@@ -285,9 +316,8 @@ class LLMConverter:
         source_file: SourceFile,
         target: TargetLanguage,
         context_summary: str,
-    ) -> tuple[str, int, float]:
-        """Returns (converted_code, tokens_used, confidence)."""
-
+    ) -> str:
+        """Build a generic conversion prompt when no component template is available."""
         manifest = self._build_manifest(source_file, target)
         source_hint = f"Source language: {source_file.language.value}"
         target_hint  = f"Target: {_TARGET_NAMES.get(target, target.value)}"
@@ -298,7 +328,7 @@ class LLMConverter:
 
         progress = f"Chunk {chunk_index + 1} of {total_chunks}" if total_chunks > 1 else "Full file"
 
-        prompt = f"""{manifest}
+        return f"""{manifest}
 {context_block}
 ## Source Code ({progress})
 ```{source_file.language.value}
@@ -314,6 +344,47 @@ add a comment at the start of each section indicating the file path:
 
 Each public class should be in its own file.
 """
+
+    def _convert_chunk(
+        self,
+        chunk: str,
+        chunk_index: int,
+        total_chunks: int,
+        source_file: SourceFile,
+        target: TargetLanguage,
+        context_summary: str,
+        component_info: Optional[ComponentInfo] = None,
+    ) -> tuple[str, int, float]:
+        """Returns (converted_code, tokens_used, confidence)."""
+        
+        # Try to use component-specific template first
+        template = None
+        if component_info:
+            template = get_conversion_template(
+                source_file.language,
+                component_info.type,
+                target,
+            )
+            if template:
+                log.debug("Using component template: %s", template.name)
+        
+        if template:
+            # Use component-specific prompt
+            prompt = template.build_prompt(
+                source_content=chunk,
+                source_lang=source_file.language,
+                target_lang=target,
+                context={
+                    "chunk_index": chunk_index + 1,
+                    "total_chunks": total_chunks,
+                    "context_summary": context_summary,
+                }
+            )
+        else:
+            # Fall back to generic prompt
+            prompt = self._build_generic_prompt(
+                chunk, chunk_index, total_chunks, source_file, target, context_summary
+            )
 
         if not self.model_instance:
             log.warning("No Gemini client configured. Returning stub for %s", source_file.path)

@@ -9,6 +9,7 @@ import argparse
 import json
 import time
 from pathlib import Path
+from typing import List, Optional
 
 from shared.config import load_config, get_logger
 from shared.models import TargetLanguage, WorkspaceManifest
@@ -37,15 +38,18 @@ class MigrationOrchestrator:
         self,
         repo_path: str,
         target_language: TargetLanguage | None = None,
+        skip_patterns: Optional[List[str]] = None,
     ) -> str:
         start = time.time()
         log.info("=" * 60)
         log.info("Migration started for: %s", repo_path)
+        if skip_patterns:
+            log.info("Skip patterns: %s", skip_patterns)
         log.info("=" * 60)
 
         # ── Layer 1: Ingestion ────────────────────────────────────────────
         log.info("[1/6] Ingesting repository...")
-        crawler = RepoCrawler(repo_path, target_language=target_language)
+        crawler = RepoCrawler(repo_path, target_language=target_language, skip_patterns=skip_patterns)
         manifest: WorkspaceManifest = crawler.crawl()
         _checkpoint(manifest, "ingestion")
 
