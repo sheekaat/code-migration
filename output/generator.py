@@ -7,11 +7,13 @@ generates Maven POM / package.json, and produces migration report.
 from __future__ import annotations
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from output.file_splitter import FileSplitter, should_split_file
+from output.dependency_analyzer import DependencyAnalyzer, generate_dynamic_pom
 from shared.models import (
     WorkspaceManifest, ConversionResult, ConversionStatus,
     TargetLanguage, SourceLanguage,
@@ -68,7 +70,7 @@ _POM_TEMPLATE = """\
     <relativePath/>
   </parent>
 
-  <groupId>com.company</groupId>
+  <groupId>com.macys</groupId>
   <artifactId>{artifact_id}</artifactId>
   <version>1.0.0-SNAPSHOT</version>
   <name>{artifact_id}</name>
@@ -401,35 +403,74 @@ class OutputGenerator:
         }
         
         if detected_type and detected_type in type_package_map:
-            return f"com/company/{type_package_map[detected_type]}"
+            return f"com/macys/{type_package_map[detected_type]}"
         
         # Check each path component against keywords
         for part in src_path.parts:
             part_lower = part.lower()
             if part_lower in path_keywords:
-                return f"com/company/{path_keywords[part_lower]}"
+                return f"com/macys/{path_keywords[part_lower]}"
         
         # Check filename stem for keywords
         for keyword, pkg in path_keywords.items():
             if keyword in stem:
-                return f"com/company/{pkg}"
+                return f"com/macys/{pkg}"
         
         # Filename suffix checks
         if stem.endswith('controller'):
-            return "com/company/controller"
+            return "com/macys/controller"
         elif stem.endswith('service') or stem.endswith('svc'):
-            return "com/company/service"
+            return "com/macys/service"
         elif stem.endswith('repository') or stem.endswith('repo') or stem.endswith('dao'):
-            return "com/company/repository"
+            return "com/macys/repository"
         elif stem.endswith('dto') or stem.endswith('request') or stem.endswith('response'):
-            return "com/company/dto"
+            return "com/macys/dto"
         
         # Final fallback - use directory name if meaningful
         parent = src_path.parent.name.lower()
         if parent in path_keywords:
-            return f"com/company/{path_keywords[parent]}"
+            return f"com/macys/{path_keywords[parent]}"
         
-        return "com/company/app"
+        return "com/macys/app"
+
+    def _detect_main_package(self, out_dir: Path) -> Optional[str]:
+        """Detect the main package from converted Java files."""
+        java_dir = out_dir / "src" / "main" / "java"
+        if not java_dir.exists():
+            return None
+        
+        # Find all package declarations
+        packages = set()
+        for java_file in java_dir.rglob("*.java"):
+            try:
+                content = java_file.read_text(encoding='utf-8', errors='ignore')
+                match = re.search(r'package\s+([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)\s*;', content)
+                if match:
+                    pkg = match.group(1)
+                    # Convert dots to path separators
+                    pkg_path = pkg.replace('.', '/')
+                    packages.add(pkg_path)
+            except Exception:
+                continue
+        
+        if not packages:
+            return None
+        
+        # Find common prefix
+        pkg_list = sorted(packages)
+        if len(pkg_list) == 1:
+            return pkg_list[0]
+        
+        # Find longest common prefix
+        first = pkg_list[0].split('/')
+        common = []
+        for i, part in enumerate(first):
+            if all(pkg.split('/')[i] == part if i < len(pkg.split('/')) else False for pkg in pkg_list):
+                common.append(part)
+            else:
+                break
+        
+        return '/'.join(common) if common else None
 
     def _write_project_scaffold(
         self,
@@ -441,13 +482,21 @@ class OutputGenerator:
         src_lang = manifest.source_language.value if manifest.source_language else "legacy"
 
         if target == TargetLanguage.JAVA_SPRING:
-            pom = _POM_TEMPLATE.format(artifact_id=name, source_lang=src_lang)
+            # Analyze converted code to determine required dependencies
+            analyzer = DependencyAnalyzer(out_dir)
+            requirements = analyzer.analyze_project()
+            
+            # Generate dynamic POM with detected dependencies
+            pom = generate_dynamic_pom(requirements, name, src_lang)
             (out_dir / "pom.xml").write_text(pom)
-            # Spring Boot main class
-            main_java = out_dir / "src" / "main" / "java" / "com" / "company" / "app"
+            
+            # Spring Boot main class (dynamic package based on detected structure)
+            main_pkg = self._detect_main_package(out_dir) or "com/macys/app"
+            main_java = out_dir / "src" / "main" / "java" / Path(main_pkg)
             main_java.mkdir(parents=True, exist_ok=True)
+            pkg_name = main_pkg.replace('/', '.')
             (main_java / "Application.java").write_text(
-                f"package com.company.app;\n\n"
+                f"package {pkg_name};\n\n"
                 f"import org.springframework.boot.SpringApplication;\n"
                 f"import org.springframework.boot.autoconfigure.SpringBootApplication;\n\n"
                 f"@SpringBootApplication\n"
@@ -457,15 +506,11 @@ class OutputGenerator:
                 f"    }}\n"
                 f"}}\n"
             )
-            # application.properties
+            
+            # Generate dynamic application.properties
             resources = out_dir / "src" / "main" / "resources"
             resources.mkdir(parents=True, exist_ok=True)
-            (resources / "application.properties").write_text(
-                "spring.application.name=migrated-app\n"
-                "server.port=8080\n"
-                "# TODO: Configure your datasource\n"
-                "# spring.datasource.url=jdbc:postgresql://localhost/mydb\n"
-            )
+            (resources / "application.properties").write_text(requirements.get_application_properties())
         elif target == TargetLanguage.REACT_JS:
             pkg = json.loads(
                 json.dumps(_PACKAGE_JSON_TEMPLATE)

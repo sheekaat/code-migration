@@ -39,7 +39,7 @@ You are converting legacy code to modern {target}. Follow these rules strictly:
 - Classes: PascalCase
 - Methods/Variables: camelCase (Java) / camelCase (JS)
 - Constants: UPPER_SNAKE_CASE
-- Packages (Java): com.company.{{module}}
+- Packages (Java): com.macys.{{module}}
 
 ## Established Patterns
 {established_patterns}
@@ -197,7 +197,8 @@ class LLMConverter:
         self.total_tokens = 0
 
         llm_cfg = config.get("llm", {})
-        self.model = llm_cfg.get("model", "gemini-2.5-flash")
+        # Use stable model version
+        self.model = llm_cfg.get("model", "gemini-1.5-flash")
         self.max_tokens = llm_cfg.get("max_tokens", 8000)
         self.chunk_size = llm_cfg.get("chunk_size", 300)    # lines
         self.context_window = llm_cfg.get("context_window", 4)
@@ -289,13 +290,48 @@ class LLMConverter:
         )
 
     def _split_into_chunks(self, code: str) -> list[str]:
+        """Split code into chunks, trying to respect class/method boundaries."""
         lines = code.splitlines()
         if len(lines) <= self.chunk_size:
             return [code]
+        
         chunks = []
-        for i in range(0, len(lines), self.chunk_size):
-            chunks.append("\n".join(lines[i : i + self.chunk_size]))
-        return chunks
+        current_chunk = []
+        current_size = 0
+        
+        # Track brace depth to find safe split points
+        brace_depth = 0
+        in_class = False
+        
+        for i, line in enumerate(lines):
+            current_chunk.append(line)
+            current_size += 1
+            
+            # Track braces
+            brace_depth += line.count('{') - line.count('}')
+            
+            # Detect class/interface declarations
+            if re.match(r'^\s*(public\s+|abstract\s+|final\s+)?(?:class|interface|enum|record)\s+', line):
+                in_class = True
+            
+            # Safe to split at end of class when braces are balanced
+            safe_split = brace_depth == 0 and in_class and current_size >= self.chunk_size * 0.8
+            
+            # Force split at max chunk size
+            force_split = current_size >= self.chunk_size
+            
+            if safe_split or force_split:
+                chunks.append("\n".join(current_chunk))
+                current_chunk = []
+                current_size = 0
+                brace_depth = 0
+                in_class = False
+        
+        # Add remaining lines
+        if current_chunk:
+            chunks.append("\n".join(current_chunk))
+        
+        return chunks if chunks else [code]
 
     def _build_manifest(self, sf: SourceFile, target: TargetLanguage) -> str:
         patterns_text = "\n".join(
@@ -337,9 +373,17 @@ class LLMConverter:
 
 Convert the above {source_hint} snippet to {target_hint}.
 Return ONLY the converted code. No explanation. No markdown fences.
-If the source contains multiple classes/components that should be in separate files, 
+
+CRITICAL: Output COMPLETE, COMPILABLE code. NEVER partial code.
+- NEVER use comments like "// Assuming this continues", "// Previous methods", "// Rest of class"
+- NEVER output incomplete class declarations
+- NEVER use "..." to indicate skipped code
+- ALWAYS output full working code that compiles standalone
+- If the snippet is part of a larger class, output the complete converted class
+
+If the source contains multiple classes/components that should be in separate files,
 add a comment at the start of each section indicating the file path:
-  // com/company/entity/Entity.java (for Java)
+  // com/macys/entity/Entity.java (for Java)
   // src/components/Button.tsx (for React)
 
 Each public class should be in its own file.

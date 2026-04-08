@@ -6,7 +6,7 @@ Ideal for large repositories.
 
 from __future__ import annotations
 from pathlib import Path
-from typing import Generator
+from typing import Generator, Optional
 import time
 
 from shared.models import (
@@ -17,6 +17,7 @@ from shared.config import get_logger
 from conversion.rule_engine.engine import RuleEngine
 from conversion.llm_converter.converter import LLMConverter
 from output.generator import OutputGenerator
+from output.migration_doc import MigrationDocument, MigrationStatus
 
 log = get_logger(__name__)
 
@@ -37,6 +38,7 @@ class StreamingConversionPipeline:
         self._threshold = config.get("conversion", {}).get("confidence_threshold", 0.75)
         self._rule_first = config.get("conversion", {}).get("rule_engine_first", True)
         self._stats = {"green": 0, "amber": 0, "red": 0, "total_tokens": 0, "processed": 0}
+        self.migration_doc: Optional[MigrationDocument] = None
 
     def convert_manifest_streaming(
         self,
@@ -63,6 +65,15 @@ class StreamingConversionPipeline:
 
         total_files = len(order)
         log.info(f"Streaming conversion: {total_files} files to process")
+        
+        # Initialize migration document for tracking
+        self.migration_doc = MigrationDocument(output_dir)
+        self.migration_doc.start_session(
+            source_repo_path=str(manifest.files[0].path if manifest.files else "unknown"),
+            target_language=target.value,
+            total_files=total_files,
+            config=self.config
+        )
 
         for idx, path in enumerate(order, 1):
             sf = manifest.get_file_by_path(path)
@@ -95,6 +106,23 @@ class StreamingConversionPipeline:
             self._stats[sf.complexity_tier.value] += 1
             self._stats["total_tokens"] += result.total_tokens
             self._stats["processed"] = idx
+            
+            # Track in migration document
+            if self.migration_doc:
+                self.migration_doc.add_file_record(
+                    source_path=sf.path,
+                    source_content=sf.raw_content,
+                    converted_code=result.converted_code or "",
+                    source_language=sf.language.value if sf.language else "unknown",
+                    target_language=target.value,
+                    conversion_status=result.status.value if result.status else "unknown",
+                    confidence=result.confidence,
+                    detected_component_type=sf.pattern.value if sf.pattern else None,
+                    package_path=self._determine_package_path(sf) if target == TargetLanguage.JAVA_SPRING else None,
+                    class_name=Path(sf.path).stem,
+                    errors=[result.review_notes] if result.review_notes else [],
+                    conversion_time_seconds=elapsed
+                )
 
             # Write output immediately (streaming)
             if result.converted_code:
@@ -109,6 +137,13 @@ class StreamingConversionPipeline:
         # Update manifest stats at end
         manifest.stats["conversion"] = self._stats.copy()
         manifest.stats["llm"] = self.llm_converter.stats()
+        
+        # End migration document session
+        if self.migration_doc:
+            self.migration_doc.end_session(
+                status=MigrationStatus.COMPLETED if self._stats.get("failed", 0) == 0 else MigrationStatus.NEEDS_REVIEW,
+                summary_stats=self._stats.copy()
+            )
 
     def _convert_file(self, sf: SourceFile, target: TargetLanguage) -> ConversionResult:
         """Convert a single file using appropriate strategy."""
@@ -241,33 +276,33 @@ class StreamingConversionPipeline:
         }
         
         if detected_type and detected_type in type_package_map:
-            return f"com/company/{type_package_map[detected_type]}"
+            return f"com/macys/{type_package_map[detected_type]}"
         
         # Check each path component against keywords
         for part in src_path.parts:
             part_lower = part.lower()
             if part_lower in path_keywords:
-                return f"com/company/{path_keywords[part_lower]}"
+                return f"com/macys/{path_keywords[part_lower]}"
         
         # Check filename stem for keywords
         for keyword, pkg in path_keywords.items():
             if keyword in stem:
-                return f"com/company/{pkg}"
+                return f"com/macys/{pkg}"
         
         # Default based on file extension/type
         if stem.endswith('controller'):
-            return "com/company/controller"
+            return "com/macys/controller"
         elif stem.endswith('service') or stem.endswith('svc'):
-            return "com/company/service"
+            return "com/macys/service"
         elif stem.endswith('repository') or stem.endswith('repo') or stem.endswith('dao'):
-            return "com/company/repository"
+            return "com/macys/repository"
         
         # Final fallback - use directory name if meaningful
         parent = src_path.parent.name.lower()
         if parent in path_keywords:
-            return f"com/company/{path_keywords[parent]}"
+            return f"com/macys/{path_keywords[parent]}"
         
-        return "com/company/app"
+        return "com/macys/app"
 
     def get_stats(self) -> dict:
         """Get current conversion stats."""

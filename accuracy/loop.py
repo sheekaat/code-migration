@@ -24,6 +24,7 @@ from accuracy.scorer import AccuracyEngine, AccuracyReport, ACCURACY_THRESHOLD
 from accuracy.analyser import FailureAnalyser, RemediationStrategy
 from accuracy.enhanced_remediation import EnhancedRemediationExecutor, apply_extended_structural_fix
 from accuracy.knowledge_base import KnowledgeBase
+from output.migration_doc import MigrationDocument, MigrationDocManager
 
 log = get_logger(__name__)
 
@@ -55,12 +56,13 @@ class SelfHealingAccuracyLoop:
     Uses EnhancedRemediationExecutor with per-dimension targeting.
     """
 
-    def __init__(self, config: dict, knowledge_base: Optional[KnowledgeBase] = None):
+    def __init__(self, config: dict, knowledge_base: Optional[KnowledgeBase] = None, migration_doc: Optional[MigrationDocument] = None):
         self.config      = config
         self.scorer      = AccuracyEngine()
         self.analyser    = FailureAnalyser()
         self.remediator  = EnhancedRemediationExecutor(config)
         self.kb          = knowledge_base or KnowledgeBase.load()
+        self.migration_doc = migration_doc
 
     def run(self, result: ConversionResult) -> LoopResult:
         sf       = result.source_file
@@ -91,6 +93,15 @@ class SelfHealingAccuracyLoop:
                 result.converted_code = patched
                 result.rules_applied = list(result.rules_applied or []) + structural_fixes
 
+        # Track initial state in migration doc
+        if self.migration_doc:
+            self.migration_doc.update_file_record(
+                source_path=path,
+                conversion_status="accuracy_fix_in_progress",
+                validation_issues=[],
+                increment_attempt=True
+            )
+        
         for iteration in range(1, MAX_ITERATIONS + 1):
             log.info("  [Accuracy Loop] %s — iteration %d/%d", path, iteration, MAX_ITERATIONS)
 
@@ -144,6 +155,16 @@ class SelfHealingAccuracyLoop:
                 f"Self-healing loop exhausted ({MAX_ITERATIONS} iterations). "
                 f"Final score: {loop.final_score:.1f}%. "
                 f"Issues: {'; '.join(final_report.all_issues[:3])}"
+            )
+        
+        # Update migration doc with final state
+        if self.migration_doc:
+            self.migration_doc.update_file_record(
+                source_path=path,
+                converted_code=result.converted_code or "",
+                conversion_status="completed" if loop.passed else "needs_review",
+                confidence=loop.final_score,
+                validation_issues=[{"issue": i} for i in (final_report.all_issues if hasattr(final_report, 'all_issues') else [])],
             )
 
         # ── Update knowledge base ──────────────────────────────────────────
@@ -206,11 +227,12 @@ def run_accuracy_loop(
     manifest: WorkspaceManifest,
     config: dict,
     kb: Optional[KnowledgeBase] = None,
+    migration_doc: Optional[MigrationDocument] = None,
 ) -> WorkspaceManifest:
     """
     Drop-in function to run the full self-healing loop on a manifest.
     Called from the orchestration pipeline between conversion and output.
     """
-    loop = SelfHealingAccuracyLoop(config, knowledge_base=kb)
+    loop = SelfHealingAccuracyLoop(config, knowledge_base=kb, migration_doc=migration_doc)
     loop.run_for_manifest(manifest)
     return manifest

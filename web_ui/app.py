@@ -98,6 +98,11 @@ def run_migration(repo_path: str, target: str, job_id: str, use_streaming: bool 
         
         # Load config and setup
         config = load_config()
+        # Force fast model and disable accuracy loop
+        config['llm'] = config.get('llm', {})
+        config['llm']['model'] = 'gemini-2.5-flash'
+        config['llm']['chunk_size'] = 400  # Large chunks to avoid splitting files
+        config['accuracy'] = {'enabled': False}
         target_enum = TargetLanguage(target.lower())
         output_base = Path(__file__).parent.parent / 'output'
         output_base.mkdir(parents=True, exist_ok=True)
@@ -203,7 +208,7 @@ def _run_streaming_migration(repo_path, target_enum, config, output_base, queue,
     log.info(f"  Validation: {passed}/{len(reports)} passed")
     
     # Layer 5: Accuracy Loop (for files that need improvement)
-    if config.get('accuracy', {}).get('enabled', True):
+    if config.get('accuracy', {}).get('enabled', False):
         log.info("[5/6] Running accuracy improvements...")
         if queue:
             queue.put({'type': 'status', 'message': '[5/6] Improving accuracy...'})
@@ -218,9 +223,9 @@ def _run_streaming_migration(repo_path, target_enum, config, output_base, queue,
         queue.put({'type': 'status', 'message': '[6/6] Generating output report...'})
     
     generator = OutputGenerator(config)
-    generator._write_reports(manifest, reports, output_dir)
+    result_dir = generator.generate(manifest, reports)
     
-    return output_dir
+    return result_dir
 
 
 @app.route('/')
