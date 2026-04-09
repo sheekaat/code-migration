@@ -44,6 +44,9 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "generate_tests": True,
         "generate_ci": True,
     },
+    "java": {
+        "base_package": "com.macys",  # Configurable base package for Java output
+    },
 }
 
 

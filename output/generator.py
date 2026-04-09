@@ -272,6 +272,7 @@ class OutputGenerator:
         self.base_dir = Path(config.get("output", {}).get("base_dir", "./output"))
         self.gen_tests = config.get("output", {}).get("generate_tests", True)
         self.gen_ci    = config.get("output", {}).get("generate_ci", True)
+        self.base_package = config.get("java", {}).get("base_package", "com.macys").replace(".", "/")
 
     def generate(self, manifest: WorkspaceManifest, validation_reports: list) -> str:
         out_dir = self.base_dir / f"migration_{manifest.id[:8]}"
@@ -313,8 +314,12 @@ class OutputGenerator:
                     language=language
                 )
                 if segments:
-                    # Write split files
-                    written_paths = splitter.write_segments(out_dir / "src", segments)
+                    # Write split files to Maven structure
+                    target = manifest.target_language
+                    if target == TargetLanguage.JAVA_SPRING:
+                        written_paths = splitter.write_segments(out_dir / "src" / "main" / "java", segments, base_package=self.base_package)
+                    else:
+                        written_paths = splitter.write_segments(out_dir / "src", segments, base_package=self.base_package)
                     written += len(written_paths)
                     log.info("Split into %d files", len(written_paths))
                     continue
@@ -331,107 +336,61 @@ class OutputGenerator:
         """
         Determine the base path for Java package structure.
         
-        Uses source directory structure + detected component type for intelligent
-        package organization. Ensures standard Spring Boot package conventions.
+        Creates consistent domain-based structure: com.macys.<domain>
         
-        Package mapping:
-        - Controllers → com/company/controller
-        - Services → com/company/service
-        - Entities → com/company/entity
-        - Repositories → com/company/repository
-        - DTOs → com/company/dto
-        - Utils → com/company/util
-        - Config → com/company/config
+        Examples:
+            UserController.cs -> com/macys/user
+            UserManagementService.cs -> com/macys/usermanagement
         """
+        import re
+        
         if not result.source_file:
-            return "com/company/app"
+            return "com/macys/app"
         
         src_path = Path(result.source_file.path)
-        stem = src_path.stem.lower()
+        stem = src_path.stem
         
-        # Comprehensive keyword mapping
-        path_keywords = {
-            'controller': 'controller',
-            'controllers': 'controller',
-            'ctrl': 'controller',
-            'service': 'service',
-            'services': 'service',
-            'svc': 'service',
-            'business': 'service',
-            'bll': 'service',
-            'entity': 'entity',
-            'entities': 'entity',
-            'model': 'entity',
-            'models': 'entity',
-            'domain': 'entity',
-            'repository': 'repository',
-            'repositories': 'repository',
-            'repo': 'repository',
-            'dao': 'repository',
-            'dal': 'repository',
-            'data': 'repository',
-            'dto': 'dto',
-            'dtos': 'dto',
-            'viewmodel': 'dto',
-            'vm': 'dto',
-            'request': 'dto',
-            'response': 'dto',
-            'util': 'util',
-            'utils': 'util',
-            'helper': 'util',
-            'helpers': 'util',
-            'common': 'common',
-            'shared': 'common',
-            'config': 'config',
-            'configuration': 'config',
-            'settings': 'config',
-        }
+        # Extract domain from class name by removing type suffixes
+        type_suffixes = [
+            'Controller', 'Service', 'Repository', 'Repo', 'Dao', 'Impl',
+            'Entity', 'Model', 'Dto', 'DTO', 'Request', 'Response',
+            'Validator', 'Config', 'Configuration', 'Util', 'Helper',
+            'Exception', 'Handler', 'Mapper', 'Factory', 'Host'
+        ]
         
-        # Check for component type info from file_type_registry
-        detected_type = getattr(result.source_file, 'detected_component_type', None)
+        domain = stem
+        for suffix in type_suffixes:
+            if domain.endswith(suffix):
+                domain = domain[:-len(suffix)]
+                break
         
-        type_package_map = {
-            'CONTROLLER': 'controller',
-            'SERVICE': 'service',
-            'ENTITY': 'entity',
-            'REPOSITORY': 'repository',
-            'DATA_ACCESS': 'repository',
-            'CLASS': 'util',
-            'MODULE': 'util',
-            'INTERFACE': 'common',
-            'ENUM': 'common',
-        }
+        # Convert to lowercase
+        domain = re.sub(r'([a-z])([A-Z])', r'\1\2', domain).lower()
+        domain = re.sub(r'[^a-z0-9]', '', domain)
         
-        if detected_type and detected_type in type_package_map:
-            return f"com/macys/{type_package_map[detected_type]}"
+        # Smart domain consolidation - normalize common variations
+        # Remove type suffixes and normalize plural forms generically
+        type_suffixes = ['service', 'controller', 'repository', 'repo', 'dao', 'impl',
+                        'entity', 'model', 'dto', 'request', 'response', 'validator',
+                        'config', 'util', 'helper', 'exception', 'handler', 'mapper',
+                        'factory', 'host', 'process', 'processing', 'management', 'api']
         
-        # Check each path component against keywords
-        for part in src_path.parts:
-            part_lower = part.lower()
-            if part_lower in path_keywords:
-                return f"com/macys/{path_keywords[part_lower]}"
+        for suffix in type_suffixes:
+            if domain.endswith(suffix) and len(domain) > len(suffix) + 1:
+                domain = domain[:-len(suffix)]
+                break
         
-        # Check filename stem for keywords
-        for keyword, pkg in path_keywords.items():
-            if keyword in stem:
-                return f"com/macys/{pkg}"
+        # Normalize plural forms (users -> user, orders -> order)
+        if domain.endswith('s') and len(domain) > 1:
+            domain = domain[:-1]
         
-        # Filename suffix checks
-        if stem.endswith('controller'):
-            return "com/macys/controller"
-        elif stem.endswith('service') or stem.endswith('svc'):
-            return "com/macys/service"
-        elif stem.endswith('repository') or stem.endswith('repo') or stem.endswith('dao'):
-            return "com/macys/repository"
-        elif stem.endswith('dto') or stem.endswith('request') or stem.endswith('response'):
-            return "com/macys/dto"
+        # Clean up any remaining non-alphanumeric
+        domain = re.sub(r'[^a-z0-9]', '', domain)
         
-        # Final fallback - use directory name if meaningful
-        parent = src_path.parent.name.lower()
-        if parent in path_keywords:
-            return f"com/macys/{path_keywords[parent]}"
+        if not domain or len(domain) < 2:
+            domain = "app"
         
-        return "com/macys/app"
+        return f"{self.base_package}/{domain}"
 
     def _detect_main_package(self, out_dir: Path) -> Optional[str]:
         """Detect the main package from converted Java files."""

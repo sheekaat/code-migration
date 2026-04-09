@@ -41,6 +41,36 @@ _IGNORE_DIRS = {
     "packages", ".vs", "__pycache__", "dist", "build",
 }
 
+# Files that should not be converted directly (infrastructure/config files)
+_SKIP_FILE_PATTERNS = [
+    "Program.cs",              # .NET entry point - Spring Boot Application.java is generated
+    "Startup.cs",              # .NET startup - Spring Boot handles this
+    "AssemblyInfo.cs",         # Assembly metadata - not needed in Java
+    "Global.asax.cs",          # ASP.NET application start - not needed
+    "Global.asax",             # ASP.NET application start - not needed
+    "*.csproj",                # Project files - Maven pom.xml is generated
+    "*.sln",                   # Solution files - not needed
+    "*.vbproj",                # VB project files
+    "*.vbp",                   # VB6 project files
+    "app.config",              # App config - application.properties generated
+    "web.config",              # Web config - application.properties generated
+    "*.settings.cs",           # Designer-generated settings
+    "*.designer.cs",           # Designer-generated code
+    "*.g.cs",                  # Generated code files
+    "*.g.i.cs",                # Generated code files
+    "*.min.js",                # Minified JavaScript
+    "*.bundle.js",             # Bundled JavaScript
+    "packages.config",         # NuGet packages - Maven handles deps
+    "*.resx",                  # Resource files - handled differently
+    "*.resources",             # Compiled resources
+    "*Test*.cs",               # Test files - converted separately if needed
+    "*Tests*.cs",              # Test files
+    "*Spec*.cs",               # Test files
+    "*.xsd.cs",                # Generated from XSD
+    "*.svc.cs",                # WCF service files - handled differently
+    "Reference.cs",            # Service reference generated files
+]
+
 _SOURCE_LANGUAGE_TARGETS: dict[SourceLanguage, TargetLanguage] = {
     SourceLanguage.CSHARP:    TargetLanguage.JAVA_SPRING,
     SourceLanguage.ASPNET:    TargetLanguage.JAVA_SPRING,
@@ -115,6 +145,30 @@ class RepoCrawler:
         lang = _EXT_MAP.get(ext)
         if lang is None:
             return None
+        
+        rel_path = str(path.relative_to(self.repo_path))
+        
+        # Check if file should be skipped from direct conversion
+        for pattern in _SKIP_FILE_PATTERNS:
+            if fnmatch.fnmatch(path.name, pattern) or fnmatch.fnmatch(rel_path, pattern):
+                log.info("[SKIP CONVERT] %s matches non-convertible pattern: %s", rel_path, pattern)
+                # Still include file in manifest for reference, but mark as not for conversion
+                try:
+                    raw = path.read_text(encoding="utf-8", errors="replace")
+                    lines = raw.splitlines()
+                    sf = SourceFile(
+                        path=rel_path,
+                        language=lang,
+                        raw_content=raw,
+                        line_count=len(lines),
+                        char_count=len(raw),
+                    )
+                    sf.skip_conversion = True
+                    sf.skip_reason = f"Non-convertible file type: {pattern}"
+                    return sf
+                except OSError:
+                    return None
+        
         try:
             raw = path.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
@@ -122,7 +176,6 @@ class RepoCrawler:
             return None
 
         lines = raw.splitlines()
-        rel_path = str(path.relative_to(self.repo_path))
         
         # Detect file type and components
         file_type_info = detect_file_type(rel_path, raw)

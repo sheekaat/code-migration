@@ -220,6 +220,46 @@ class SelfHealingAccuracyLoop:
         log.info("Accuracy loop complete: %s", stats)
         return stats
 
+    def run_for_files(self, manifest: WorkspaceManifest, failed_reports: list) -> dict:
+        """Run accuracy loop only on files that failed validation."""
+        failed_paths = {r.file_path for r in failed_reports}
+        log.info("Running self-healing accuracy loop on %d failed files", len(failed_paths))
+        
+        all_loops: list[LoopResult] = []
+        passed = 0
+        file_stats = {}
+        
+        for result in manifest.conversion_results:
+            if not result.converted_code:
+                continue
+            if result.source_file and result.source_file.path not in failed_paths:
+                continue  # Skip files that passed validation
+                
+            loop = self.run(result)
+            all_loops.append(loop)
+            
+            if loop.passed:
+                passed += 1
+                
+            # Track per-file stats
+            if result.source_file:
+                file_stats[result.source_file.path] = {
+                    'fixes': list(set(loop.strategies_used)),
+                    'final_score': loop.final_score,
+                    'iterations': loop.iterations,
+                    'passed': loop.passed
+                }
+        
+        total = len(all_loops)
+        stats = {
+            "total": total,
+            "passed": passed,
+            "pass_rate": f"{100*passed//max(total,1)}%",
+            "file_stats": file_stats,
+        }
+        log.info("Accuracy loop (targeted) complete: %s", stats)
+        return stats
+
 
 # ─── Convenience wrapper ──────────────────────────────────────────────────────
 

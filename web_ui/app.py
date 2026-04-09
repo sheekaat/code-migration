@@ -181,7 +181,30 @@ def _run_streaming_migration(repo_path, target_enum, config, output_base, queue,
     
     streaming_pipeline = StreamingConversionPipeline(config)
     output_dir = output_base / f'migration_{job_id}'
+    
+    # Clean up ALL old migration folders before starting fresh
+    # This ensures only one migration folder exists at a time
+    for old_dir in output_base.glob('migration_job_*'):
+        if old_dir != output_dir and old_dir.is_dir():
+            log.info(f"Removing old migration folder: {old_dir.name}")
+            import shutil
+            shutil.rmtree(old_dir, ignore_errors=True)
+    
+    # Also clean up any folders with date-based names (old format)
+    for old_dir in output_base.glob('migration_*'):
+        if old_dir != output_dir and old_dir.is_dir():
+            try:
+                # Check if it looks like a migration folder (contains src/main/java or pom.xml)
+                if (old_dir / 'src' / 'main' / 'java').exists() or (old_dir / 'pom.xml').exists():
+                    log.info(f"Removing old migration folder: {old_dir.name}")
+                    shutil.rmtree(old_dir, ignore_errors=True)
+            except Exception:
+                pass  # Skip if we can't determine
+    
     output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Ensure manifest ID matches job_id so OutputGenerator uses correct directory
+    manifest.id = job_id
     
     # Convert files one at a time
     results = []
@@ -205,17 +228,36 @@ def _run_streaming_migration(repo_path, target_enum, config, output_base, queue,
     validator = ValidationRunner(config)
     reports = validator.validate_manifest(manifest)
     passed = sum(1 for r in reports if r.overall_passed)
-    log.info(f"  Validation: {passed}/{len(reports)} passed")
+    total = len(reports)
+    pass_rate = passed / total if total > 0 else 1.0
+    log.info(f"  Validation: {passed}/{total} passed ({pass_rate:.1%})")
     
-    # Layer 5: Accuracy Loop (for files that need improvement)
-    if config.get('accuracy', {}).get('enabled', False):
-        log.info("[5/6] Running accuracy improvements...")
+    # Layer 5: Smart Conditional Accuracy Loop
+    # Only run on files that fail validation (not all files)
+    accuracy_threshold = config.get('accuracy', {}).get('threshold', 0.8)  # 80%
+    if pass_rate < accuracy_threshold:
+        failed_files = [r for r in reports if not r.overall_passed]
+        log.info(f"[5/6] Running accuracy improvements on {len(failed_files)} failed files...")
         if queue:
-            queue.put({'type': 'status', 'message': '[5/6] Improving accuracy...'})
+            queue.put({'type': 'status', 'message': f'[5/6] Improving {len(failed_files)} failed files...'})
         
         accuracy_loop = SelfHealingAccuracyLoop(config)
-        accuracy_stats = accuracy_loop.run_for_manifest(manifest)
+        accuracy_stats = accuracy_loop.run_for_files(manifest, failed_files)
         log.info(f"  Accuracy: {accuracy_stats.get('pass_rate', '0%')} pass rate")
+        
+        # Update migration doc if available
+        if hasattr(manifest, 'migration_doc') and manifest.migration_doc:
+            for file_path, stats in accuracy_stats.get('file_stats', {}).items():
+                manifest.migration_doc.update_file_record(
+                    source_path=file_path,
+                    validation_issues=stats.get('fixes', []),
+                    confidence=stats.get('final_score', 0) / 100.0  # Convert percentage to 0-1
+                )
+    else:
+        log.info("[5/6] Validation passed threshold, skipping accuracy loop")
+    
+    # Print final conversion statistics
+    streaming_pipeline.print_final_stats()
     
     # Layer 6: Generate final report
     log.info("[6/6] Generating output report...")

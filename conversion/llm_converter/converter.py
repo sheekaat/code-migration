@@ -50,7 +50,8 @@ You are converting legacy code to modern {target}. Follow these rules strictly:
 ## Output Rules
 - Return ONLY the converted code, no explanation
 - Preserve all comments (translated to target syntax)
-- Add TODO comments for constructs that need manual review
+- CRITICAL: Convert ALL business logic - NEVER replace with TODO stubs or placeholders
+- Only add TODO comments for: external API URLs, hardcoded credentials, or platform-specific features
 - Maintain original logic exactly — do not simplify or optimize
 """
 
@@ -64,12 +65,14 @@ _JAVA_SPRING_SPECIFICS = """
 - Use Lombok @Data, @Builder, @NoArgsConstructor where appropriate
 
 ## Business Logic Translation Rules
+- CRITICAL: NEVER stub out methods with TODOs - always convert the full implementation
 - Preserve ALL business rules exactly — don't simplify conditional logic
 - Convert all validation rules to bean validation annotations or explicit checks
 - Maintain exact calculation logic — don't optimize or change math operations
 - Preserve error handling flow — convert VB6 On Error to try/catch with same behavior
 - Keep transaction boundaries — use @Transactional for atomic operations
 - Preserve data access patterns — convert ADODB to JPA but keep query logic
+- Convert retry logic, logging, and notification calls to equivalent Java patterns
 """
 
 _REACT_SPECIFICS = """
@@ -83,6 +86,7 @@ _REACT_SPECIFICS = """
 - No class components — functional only
 
 ## Business Logic Translation Rules
+- CRITICAL: NEVER stub out functions with TODOs - always convert the full implementation
 - Preserve ALL business rules exactly — don't simplify conditional logic
 - Maintain exact calculation logic in event handlers
 - Preserve form validation rules exactly

@@ -97,6 +97,8 @@ class SourceFile:
     dependencies: list[str] = field(default_factory=list)   # other file paths
     line_count: int = 0
     char_count: int = 0
+    skip_conversion: bool = False
+    skip_reason: Optional[str] = None
 
 
 @dataclass
@@ -179,6 +181,7 @@ class WorkspaceManifest:
     conversion_results: list[ConversionResult] = field(default_factory=list)
     stats: dict[str, Any] = field(default_factory=dict)
     conversion_manifest: str = ""     # shared context doc for LLM calls
+    migration_doc: Optional[Any] = None  # MigrationDocument for tracking
 
     def get_file_by_path(self, path: str) -> Optional[SourceFile]:
         return next((f for f in self.files if f.path == path), None)
