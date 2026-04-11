@@ -275,7 +275,7 @@ class OutputGenerator:
         self.base_package = config.get("java", {}).get("base_package", "com.macys").replace(".", "/")
 
     def generate(self, manifest: WorkspaceManifest, validation_reports: list) -> str:
-        out_dir = self.base_dir / f"migration_{manifest.id[:8]}"
+        out_dir = self.base_dir / f"migration_{manifest.id}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         target = manifest.target_language
@@ -306,7 +306,7 @@ class OutputGenerator:
                 log.info("Detected multi-file content, splitting...")
                 
                 # Determine base path for Java package structure
-                base_path = self._determine_base_path(result, manifest)
+                base_path = self._determine_base_path(result)
                 
                 segments = splitter.intelligent_split(
                     result.converted_code,
@@ -317,80 +317,100 @@ class OutputGenerator:
                     # Write split files to Maven structure
                     target = manifest.target_language
                     if target == TargetLanguage.JAVA_SPRING:
-                        written_paths = splitter.write_segments(out_dir / "src" / "main" / "java", segments, base_package=self.base_package)
+                        written_paths = splitter.write_segments(out_dir / "src" / "main" / "java", segments, base_package=base_path)
                     else:
-                        written_paths = splitter.write_segments(out_dir / "src", segments, base_package=self.base_package)
+                        written_paths = splitter.write_segments(out_dir / "src", segments, base_package=base_path)
                     written += len(written_paths)
                     log.info("Split into %d files", len(written_paths))
                     continue
             
-            # Default: write as single file
-            dest = _target_path(result, out_dir)
+            # Default: write as single file - use source-derived path
+            if result.target_language == TargetLanguage.JAVA_SPRING:
+                # ALWAYS use source-derived base_path, never LLM-generated package
+                package_path = self._determine_base_path(result)
+                
+                # Use original filename stem - preserve interface prefixes like "I"
+                class_name = Path(result.source_file.path).stem
+                dest = out_dir / "src" / "main" / "java" / Path(package_path) / f"{class_name}.java"
+            else:
+                dest = _target_path(result, out_dir)
+            
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(result.converted_code, encoding="utf-8")
             written += 1
             
         log.info("Wrote %d converted files", written)
     
-    def _determine_base_path(self, result, manifest) -> str:
+    def _determine_base_path(self, result: ConversionResult) -> str:
         """
-        Determine the base path for Java package structure.
-        
-        Creates consistent domain-based structure: com.macys.<domain>
-        
-        Examples:
-            UserController.cs -> com/macys/user
-            UserManagementService.cs -> com/macys/usermanagement
+        Determine Java package base path - CONSOLIDATED single domain approach.
+        Creates: com.macys.mst.<domain>.<type>.<subdomain>
+        Example: com.macys.mst.order.service.externalapi
         """
         import re
-        
-        if not result.source_file:
-            return "com/macys/app"
-        
         src_path = Path(result.source_file.path)
         stem = src_path.stem
+        stem_lower = stem.lower()
         
-        # Extract domain from class name by removing type suffixes
+        # Extract domain from folder structure
+        domain = None
+        suffixes_to_remove = ['service', 'core', 'legacy', 'host', 'api', 'web', 'app', 'system', 'platform']
+        prefixes_to_remove = ['legacy', 'core']
+        
+        for part in src_path.parts:
+            part_lower = part.lower()
+            if part_lower in ('src', 'main', 'java', 'com', 'macys', 'mst', 'input', 'output', 
+                             'conversion', 'shared', 'models', 'repositories', 'services', 
+                             'controllers', 'helpers', 'bin', 'obj', 'properties'):
+                continue
+            
+            cleaned = part_lower
+            for prefix in prefixes_to_remove:
+                if cleaned.startswith(prefix):
+                    cleaned = cleaned[len(prefix):]
+            for suffix in suffixes_to_remove:
+                if cleaned.endswith(suffix):
+                    cleaned = cleaned[:-len(suffix)]
+            
+            if cleaned and len(cleaned) > 2:
+                domain = cleaned
+                break
+        
+        if not domain:
+            domain = "shared"
+        
+        # Extract subdomain from class name by removing type suffixes
         type_suffixes = [
             'Controller', 'Service', 'Repository', 'Repo', 'Dao', 'Impl',
             'Entity', 'Model', 'Dto', 'DTO', 'Request', 'Response',
             'Validator', 'Config', 'Configuration', 'Util', 'Helper',
-            'Exception', 'Handler', 'Mapper', 'Factory', 'Host'
+            'Exception', 'Handler', 'Mapper', 'Factory', 'Host', 'Processing'
         ]
         
-        domain = stem
+        subdomain = stem
         for suffix in type_suffixes:
-            if domain.endswith(suffix):
-                domain = domain[:-len(suffix)]
+            if subdomain.endswith(suffix):
+                subdomain = subdomain[:-len(suffix)]
                 break
+        subdomain = re.sub(r'([a-z])([A-Z])', r'\1\2', subdomain).lower()
+        subdomain = re.sub(r'[^a-z0-9]', '', subdomain)
         
-        # Convert to lowercase
-        domain = re.sub(r'([a-z])([A-Z])', r'\1\2', domain).lower()
-        domain = re.sub(r'[^a-z0-9]', '', domain)
+        # Determine type folder based on filename
+        if 'repository' in stem_lower:
+            type_folder = "repository"
+        elif 'service' in stem_lower:
+            type_folder = "service"
+        elif 'helper' in stem_lower:
+            type_folder = "helper"
+        elif 'util' in stem_lower:
+            type_folder = "util"
+        elif 'controller' in stem_lower:
+            type_folder = "controller"
+        else:
+            type_folder = "model"
         
-        # Smart domain consolidation - normalize common variations
-        # Remove type suffixes and normalize plural forms generically
-        type_suffixes = ['service', 'controller', 'repository', 'repo', 'dao', 'impl',
-                        'entity', 'model', 'dto', 'request', 'response', 'validator',
-                        'config', 'util', 'helper', 'exception', 'handler', 'mapper',
-                        'factory', 'host', 'process', 'processing', 'management', 'api']
-        
-        for suffix in type_suffixes:
-            if domain.endswith(suffix) and len(domain) > len(suffix) + 1:
-                domain = domain[:-len(suffix)]
-                break
-        
-        # Normalize plural forms (users -> user, orders -> order)
-        if domain.endswith('s') and len(domain) > 1:
-            domain = domain[:-1]
-        
-        # Clean up any remaining non-alphanumeric
-        domain = re.sub(r'[^a-z0-9]', '', domain)
-        
-        if not domain or len(domain) < 2:
-            domain = "app"
-        
-        return f"{self.base_package}/{domain}"
+        # Return consolidated path: com/macys/mst/<domain>/<type>/<subdomain>
+        return f"com/macys/mst/{domain}/{type_folder}/{subdomain}"
 
     def _detect_main_package(self, out_dir: Path) -> Optional[str]:
         """Detect the main package from converted Java files."""

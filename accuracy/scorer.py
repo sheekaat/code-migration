@@ -250,13 +250,46 @@ class BehavioralScorer:
     null safety, error handling, async correctness, data flow.
     """
 
+    # Stub detection patterns
+    _STUB_PATTERNS = [
+        (re.compile(r'mock logic', re.I), "Mock implementation detected - actual business logic was not converted"),
+        (re.compile(r'simulate.*work', re.I), "Simulated placeholder detected - actual logic was not converted"),
+        (re.compile(r'This method would contain', re.I), "Placeholder comment detected - method body was not converted"),
+        (re.compile(r'For example:', re.I), "Example comment detected - actual implementation was not converted"),
+        # NOTE: Thread.sleep is legitimate conversion from C# Thread.Sleep()
+        # Only flag as stub if it has "simulate" or "placeholder" comments
+        # (re.compile(r'Thread\.sleep\s*\(\s*\d+\)\s*;\s*//\s*(simulate|placeholder)', re.I), "Thread.sleep with placeholder comment"),
+        (re.compile(r'//.*would be.*converted', re.I), "Placeholder comment detected - code was not actually converted"),
+        (re.compile(r'would be implemented', re.I), "Stub comment detected - methods not actually implemented"),
+        (re.compile(r'Further methods would be', re.I), "Incomplete implementation - methods not converted"),
+        (re.compile(r'detailed logic was not provided', re.I), "Stub excuse - claimed logic missing but should have been converted"),
+        (re.compile(r'placeholder.*log.*statement', re.I), "Placeholder detected - actual business logic not converted"),
+        (re.compile(r'If actual logic were provided', re.I), "Stub comment - should have converted actual logic"),
+        (re.compile(r'In a real scenario', re.I), "Stub pattern - describing instead of implementing"),
+        (re.compile(r'Example:|//.*for example', re.I), "Example placeholder instead of actual code"),
+    ]
+
     def score(
         self, source: str, converted: str, target: TargetLanguage
     ) -> DimensionScore:
         issues: list[str] = []
         s = 100.0
 
+        # Check for stub/mock implementations
+        for pattern, message in self._STUB_PATTERNS:
+            if pattern.search(converted):
+                issues.append(message)
+                s -= 25  # Heavy penalty for stubs
+
         if target == TargetLanguage.JAVA_SPRING:
+            # Count methods in source vs converted - detect missing methods
+            source_methods = len(re.findall(r'(public|private|protected)\s+\w+\s+\w+\s*\([^)]*\)\s*\{', source))
+            converted_methods = len(re.findall(r'(public|private|protected)\s+\w+\s+\w+\s*\([^)]*\)\s*\{', converted))
+            if source_methods > 0 and converted_methods < source_methods:
+                missing = source_methods - converted_methods
+                issues.append(f"Missing {missing} method(s) - only {converted_methods}/{source_methods} converted")
+                s -= 15 * missing  # Heavy penalty per missing method
+            
             # Null safety
             if "??" in source and "Optional" not in converted and "orElse" not in converted:
                 issues.append("Null-coalescing operator not translated to Optional")

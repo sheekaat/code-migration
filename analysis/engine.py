@@ -268,6 +268,11 @@ def analyse(manifest: WorkspaceManifest, config: dict) -> WorkspaceManifest:
 
         # Score complexity
         sf.complexity_score, sf.complexity_tier = compute_complexity(sf, config)
+        
+        # Force service files to be at least AMBER tier (ensures LLM conversion)
+        if 'service' in sf.path.lower() and sf.complexity_tier == ComplexityTier.GREEN:
+            sf.complexity_tier = ComplexityTier.AMBER
+            log.info(f"  Upgrading {sf.path} to AMBER tier (service file)")
 
     # Build dependency graph
     manifest.dependency_graph = build_dependency_graph(manifest.files)

@@ -1,106 +1,141 @@
 """
-Migration Document - Tracks migration progress and enables resume functionality.
-"""
+Migration Document Tracking
 
-from __future__ import annotations
+Tracks migration session state, file records, and progress.
+"""
 import json
 import hashlib
 from pathlib import Path
-from dataclasses import dataclass, field, asdict
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from dataclasses import dataclass, field, asdict
+from typing import Optional, List, Dict
 from enum import Enum
-from shared.config import get_logger
-
-log = get_logger(__name__)
 
 
 class MigrationStatus(Enum):
-    """Status of a migration session."""
+    PENDING = "pending"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
-    NEEDS_REVIEW = "needs_review"
-    CANCELLED = "cancelled"
+    PARTIAL = "partial"
 
 
 @dataclass
-class FileMigrationRecord:
-    """Record of a single file's migration attempt."""
+class FileRecord:
+    """Record of a single file's migration."""
     source_path: str
-    source_content: str = ""
-    converted_code: str = ""
-    source_hash: str = ""
-    source_language: str = "unknown"
-    target_language: str = "unknown"
+    source_hash: str
+    converted_code: Optional[str] = None
+    target_language: str = ""
     conversion_status: str = "pending"
     confidence: float = 0.0
     detected_component_type: Optional[str] = None
     package_path: Optional[str] = None
     class_name: Optional[str] = None
     errors: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
     conversion_time_seconds: float = 0.0
-    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
-    
-    def __post_init__(self):
-        if not self.source_hash and self.source_content:
-            self.source_hash = hashlib.md5(self.source_content.encode()).hexdigest()
+    converted_at: Optional[str] = None
 
 
 @dataclass
 class MigrationSession:
-    """A single migration session."""
-    session_id: str = field(default_factory=lambda: datetime.now().strftime("%Y%m%d_%H%M%S"))
-    source_repo_path: str = ""
-    target_language: str = ""
+    """Migration session metadata."""
+    session_id: str
+    started_at: str
+    source_repo_path: str
+    target_language: str
+    status: str = "in_progress"
+    completed_at: Optional[str] = None
     total_files: int = 0
     processed_files: int = 0
-    status: str = "in_progress"
-    start_time: str = field(default_factory=lambda: datetime.now().isoformat())
-    end_time: Optional[str] = None
-    config: Dict[str, Any] = field(default_factory=dict)
-    files: List[FileMigrationRecord] = field(default_factory=list)
-    summary_stats: Dict[str, Any] = field(default_factory=dict)
+    successful_files: int = 0
+    failed_files: int = 0
 
 
-@dataclass
 class MigrationDocument:
-    """Tracks the entire migration process with file-level details."""
-    output_dir: Path
-    session_id: str = ""
-    session: Optional[MigrationSession] = None
+    """
+    Tracks migration progress and enables resume functionality.
     
-    def __post_init__(self):
-        if not self.session_id:
-            self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    Stored as JSON in output/migration_job_*/MIGRATION_DOC.json
+    """
     
-    def start_session(
-        self,
-        source_repo_path: str,
-        target_language: str,
-        total_files: int,
-        config: Optional[Dict] = None
-    ) -> None:
+    def __init__(self, output_dir: Path):
+        self.output_dir = Path(output_dir)
+        self.doc_path = self.output_dir / "MIGRATION_DOC.json"
+        self.session: Optional[MigrationSession] = None
+        self.files: Dict[str, FileRecord] = {}  # source_path -> FileRecord
+        
+        # Load existing if present
+        if self.doc_path.exists():
+            self._load()
+    
+    @property
+    def session_id(self) -> Optional[str]:
+        """Get current session ID."""
+        return self.session.session_id if self.session else None
+    
+    def load(self) -> bool:
+        """Load existing migration document. Returns True if loaded successfully."""
+        if not self.doc_path.exists():
+            return False
+        try:
+            self._load()
+            return True
+        except Exception:
+            return False
+    
+    def _load(self):
+        """Internal: Load existing migration document."""
+        try:
+            with open(self.doc_path, 'r') as f:
+                data = json.load(f)
+            
+            # Load session
+            if 'session' in data:
+                self.session = MigrationSession(**data['session'])
+            
+            # Load file records
+            for path, record_data in data.get('files', {}).items():
+                self.files[path] = FileRecord(**record_data)
+                
+        except Exception:
+            # If corrupt, start fresh
+            self.session = None
+            self.files = {}
+    
+    def _save(self):
+        """Save migration document to disk."""
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        data = {
+            'version': '1.0',
+            'saved_at': datetime.now().isoformat(),
+            'session': asdict(self.session) if self.session else None,
+            'files': {path: asdict(record) for path, record in self.files.items()}
+        }
+        
+        with open(self.doc_path, 'w') as f:
+            json.dump(data, f, indent=2)
+    
+    def start_session(self, source_repo_path: str, target_language: str, total_files: int = 0, config: dict = None):
         """Start a new migration session."""
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.session = MigrationSession(
-            session_id=self.session_id,
+            session_id=timestamp,
+            started_at=datetime.now().isoformat(),
             source_repo_path=source_repo_path,
             target_language=target_language,
-            total_files=total_files,
-            config=config or {},
-            status=MigrationStatus.IN_PROGRESS.value
+            total_files=total_files
         )
         self._save()
-        log.info(f"Started migration session: {self.session_id}")
     
     def add_file_record(
         self,
         source_path: str,
         source_content: str,
-        converted_code: str,
-        source_language: str = "unknown",
-        target_language: str = "unknown",
+        converted_code: Optional[str] = None,
+        source_language: str = "",
+        target_language: str = "",
         conversion_status: str = "pending",
         confidence: float = 0.0,
         detected_component_type: Optional[str] = None,
@@ -108,17 +143,14 @@ class MigrationDocument:
         class_name: Optional[str] = None,
         errors: Optional[List[str]] = None,
         conversion_time_seconds: float = 0.0
-    ) -> None:
-        """Add a file record to the session."""
-        if not self.session:
-            log.warning("Cannot add file record - no active session")
-            return
+    ):
+        """Add or update a file record."""
+        source_hash = hashlib.md5(source_content.encode()).hexdigest()
         
-        record = FileMigrationRecord(
+        self.files[source_path] = FileRecord(
             source_path=source_path,
-            source_content=source_content[:1000] if source_content else "",  # Truncate for storage
-            converted_code=converted_code[:1000] if converted_code else "",  # Truncate for storage
-            source_language=source_language,
+            source_hash=source_hash,
+            converted_code=converted_code,
             target_language=target_language,
             conversion_status=conversion_status,
             confidence=confidence,
@@ -126,106 +158,100 @@ class MigrationDocument:
             package_path=package_path,
             class_name=class_name,
             errors=errors or [],
-            conversion_time_seconds=conversion_time_seconds
+            conversion_time_seconds=conversion_time_seconds,
+            converted_at=datetime.now().isoformat() if converted_code else None
         )
         
-        # Check if this file already exists in the session
-        existing_idx = None
-        for idx, r in enumerate(self.session.files):
-            if r.source_path == source_path:
-                existing_idx = idx
-                break
+        # Update session counts
+        if self.session:
+            self.session.processed_files = len([f for f in self.files.values() if f.converted_at])
+            self.session.successful_files = len([f for f in self.files.values() if f.conversion_status == 'completed'])
+            self.session.failed_files = len([f for f in self.files.values() if f.conversion_status == 'failed'])
         
-        if existing_idx is not None:
-            self.session.files[existing_idx] = record
-        else:
-            self.session.files.append(record)
-        
-        self.session.processed_files = len(self.session.files)
         self._save()
     
-    def end_session(
+    def get_file_record(self, source_path: str) -> Optional[FileRecord]:
+        """Get record for a specific file."""
+        return self.files.get(source_path)
+    
+    def is_file_converted(self, source_path: str, current_content: str) -> bool:
+        """Check if file was already converted and hasn't changed."""
+        record = self.files.get(source_path)
+        if not record or not record.converted_code:
+            return False
+        
+        # Check if source changed
+        current_hash = hashlib.md5(current_content.encode()).hexdigest()
+        return record.source_hash == current_hash
+    
+    def update_file_record(
         self,
-        status: MigrationStatus,
-        summary_stats: Optional[Dict] = None
-    ) -> None:
-        """End the migration session."""
-        if not self.session:
+        source_path: str,
+        converted_code: Optional[str] = None,
+        conversion_status: Optional[str] = None,
+        confidence: Optional[float] = None,
+        errors: Optional[List[str]] = None,
+        validation_issues: Optional[List[str]] = None,
+        increment_attempt: bool = False,
+    ):
+        """Update an existing file record (backward compatibility)."""
+        if source_path not in self.files:
             return
         
-        self.session.status = status.value
-        self.session.end_time = datetime.now().isoformat()
-        self.session.summary_stats = summary_stats or {}
-        self._save()
-        log.info(f"Ended migration session: {self.session_id} with status: {status.value}")
-    
-    def load(self) -> bool:
-        """Load migration document from disk. Returns True if found."""
-        doc_path = self._get_doc_path()
-        if not doc_path.exists():
-            return False
+        record = self.files[source_path]
         
-        try:
-            with open(doc_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            self.session_id = data.get('session_id', self.session_id)
-            
-            if 'session' in data and data['session']:
-                session_data = data['session']
-                self.session = MigrationSession(
-                    session_id=session_data.get('session_id', self.session_id),
-                    source_repo_path=session_data.get('source_repo_path', ''),
-                    target_language=session_data.get('target_language', ''),
-                    total_files=session_data.get('total_files', 0),
-                    processed_files=session_data.get('processed_files', 0),
-                    status=session_data.get('status', 'in_progress'),
-                    start_time=session_data.get('start_time', datetime.now().isoformat()),
-                    end_time=session_data.get('end_time'),
-                    config=session_data.get('config', {}),
-                    summary_stats=session_data.get('summary_stats', {}),
-                    files=[FileMigrationRecord(**f) for f in session_data.get('files', [])]
-                )
-            
-            log.info(f"Loaded migration document: {self.session_id}")
-            return True
-        except Exception as e:
-            log.error(f"Failed to load migration document: {e}")
-            return False
-    
-    def _save(self) -> None:
-        """Save migration document to disk."""
-        doc_path = self._get_doc_path()
-        doc_path.parent.mkdir(parents=True, exist_ok=True)
+        if converted_code is not None:
+            record.converted_code = converted_code
+        if conversion_status is not None:
+            record.conversion_status = conversion_status
+        if confidence is not None:
+            record.confidence = confidence
+        if errors is not None:
+            record.errors = errors
+        if validation_issues is not None:
+            record.errors = validation_issues
         
-        data = {
-            'session_id': self.session_id,
-            'session': None
-        }
+        record.converted_at = datetime.now().isoformat()
         
+        # Update session counts
         if self.session:
-            session_dict = asdict(self.session)
-            data['session'] = session_dict
+            self.session.processed_files = len([f for f in self.files.values() if f.converted_at])
+            self.session.successful_files = len([f for f in self.files.values() if f.conversion_status == 'completed'])
+            self.session.failed_files = len([f for f in self.files.values() if f.conversion_status == 'failed'])
         
-        try:
-            with open(doc_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, default=str)
-        except Exception as e:
-            log.error(f"Failed to save migration document: {e}")
+        self._save()
     
-    def _get_doc_path(self) -> Path:
-        """Get path to migration document file."""
-        return self.output_dir / 'MIGRATION_DOC.json'
+    def complete_session(self, status: str = "completed"):
+        """Mark session as complete."""
+        if self.session:
+            self.session.status = status
+            self.session.completed_at = datetime.now().isoformat()
+            self._save()
+    
+    def end_session(self, status=None, summary_stats=None):
+        """End session (backward compatibility alias for complete_session)."""
+        status_str = status.value if hasattr(status, 'value') else str(status) if status else "completed"
+        self.complete_session(status=status_str)
+    
+    def get_resumeable_files(self, all_source_files: List[str]) -> List[str]:
+        """Get list of files that still need conversion."""
+        needs_conversion = []
+        
+        for source_path in all_source_files:
+            record = self.files.get(source_path)
+            
+            if not record:
+                # Never converted
+                needs_conversion.append(source_path)
+            elif not record.converted_code:
+                # No converted output
+                needs_conversion.append(source_path)
+            elif record.conversion_status == 'failed':
+                # Previous failure - retry
+                needs_conversion.append(source_path)
+        
+        return needs_conversion
 
 
-@dataclass
-class MigrationDocManager:
-    """Manager for migration documents."""
-    
-    @staticmethod
-    def get_or_create_migration_doc(output_dir: Path) -> MigrationDocument:
-        """Get existing migration doc or create new one."""
-        doc = MigrationDocument(output_dir)
-        if doc.load():
-            log.info(f"Resuming migration: {doc.session_id}")
-        return doc
+# Backward compatibility alias
+MigrationDocManager = MigrationDocument

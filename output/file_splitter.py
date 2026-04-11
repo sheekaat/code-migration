@@ -33,6 +33,9 @@ JAVA_CLASS_PATTERN = re.compile(
 # Regex to detect existing package declaration
 JAVA_PACKAGE_PATTERN = re.compile(r'^\s*package\s+([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)\s*;', re.MULTILINE)
 
+# Regex to detect import statements
+JAVA_IMPORT_PATTERN = re.compile(r'^\s*import\s+(?:static\s+)?[a-z][a-z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)*(?:\.\*)?\s*;', re.MULTILINE)
+
 # Class type detection patterns
 CLASS_TYPE_PATTERNS = {
     'entity': [
@@ -91,6 +94,11 @@ CLASS_TYPE_PATTERNS = {
     'util': [
         r'class\s+\w+Util\w*\s*[<{]',
         r'class\s+\w+Helper\w*\s*[<{]',
+    ],
+    'interface': [
+        r'^\s*public\s+interface\s+\w+',
+        r'^\s*interface\s+\w+',
+        r'^\s*@FunctionalInterface',
     ],
 }
 
@@ -244,15 +252,36 @@ class FileSplitter:
         
         log.info(f"Detected {len(matches)} classes in content, splitting...")
         
-        # Extract existing package declaration
+        # Extract existing package declaration and imports (from top of file only)
         existing_package = None
         pkg_match = JAVA_PACKAGE_PATTERN.search(content)
         if pkg_match:
             existing_package = pkg_match.group(1)
         
+        # Extract ALL imports from the top of the file (before first class)
+        # DO NOT include imports that appear inside class bodies
+        first_class_pos = matches[0].start()
+        header_section = content[:first_class_pos]
+        
+        # Find all imports in the header section only
+        import_matches = list(JAVA_IMPORT_PATTERN.finditer(header_section))
+        all_imports = [imp.group(0) for imp in import_matches]
+        log.info(f"  Found {len(all_imports)} imports in file header")
+        
+        # ALWAYS preserve original filename for single-class files
+        # This ensures ICustomerRepository.cs → ICustomerRepository.java (not CustomerRepository.java)
+        single_class = len(matches) == 1
+        original_filename = Path(base_path).stem if base_path else None
+        
         # Split content for each class
         for i, match in enumerate(matches):
-            class_name = match.group(1)
+            # CRITICAL: For single-class files, ALWAYS use original filename
+            # This preserves interface prefixes like "I" (ICustomerRepository)
+            if single_class and original_filename:
+                class_name = original_filename
+                log.info(f"  Preserving original filename: {class_name}")
+            else:
+                class_name = match.group(1)
             start_pos = match.start()
             
             # Find the end of this class (start of next class or end of content)
@@ -261,8 +290,15 @@ class FileSplitter:
             else:
                 end_pos = len(content)
             
-            # Extract class content
+            # Extract class content - remove any internal imports/annotations that should be at top
             class_content = content[start_pos:end_pos].strip()
+            
+            # Clean up any imports or package declarations inside the class content
+            # These should only appear at the top of the file
+            class_content = JAVA_IMPORT_PATTERN.sub('', class_content)
+            class_content = JAVA_PACKAGE_PATTERN.sub('', class_content)
+            class_content = re.sub(r'\n{3,}', '\n\n', class_content)  # Clean up empty lines
+            class_content = class_content.strip()
             
             # Detect class type for proper package placement
             class_type = self._detect_class_type(class_content, class_name)
@@ -278,13 +314,31 @@ class FileSplitter:
             if existing_package and not package:
                 package = existing_package
             
-            # Add package declaration if not present
-            if package and not JAVA_PACKAGE_PATTERN.search(class_content):
-                class_content = f"package {package};\n\n{class_content}"
+            # Build complete file content: package + imports + class
+            file_content_parts = []
+            
+            # Add package declaration
+            if package:
+                file_content_parts.append(f"package {package};")
+                file_content_parts.append("")  # Empty line after package
+            
+            # Add all imports (only from header, not from inside class)
+            if all_imports:
+                file_content_parts.extend(all_imports)
+                file_content_parts.append("")  # Empty line after imports
+            
+            # Add the class content (fix class name if needed)
+            if class_name:
+                # Replace any wrong class names with correct one
+                class_content = re.sub(r'class\s+\w+', f'class {class_name}', class_content)
+            file_content_parts.append(class_content)
+            
+            # Join with newlines
+            complete_content = '\n'.join(file_content_parts)
             
             segments.append(FileSegment(
                 relative_path=relative_path,
-                content=class_content,
+                content=complete_content,
                 language='java'
             ))
             log.info(f"  Extracted class: {class_name} ({class_type}) -> {relative_path}")
@@ -311,7 +365,7 @@ class FileSplitter:
         Detect the type of class from its content to determine proper package.
         
         Returns one of: entity, repository, service, controller, dto, exception,
-                       config, validator, security, util, or other
+                       config, validator, security, util, interface, or other
         """
         for class_type, patterns in CLASS_TYPE_PATTERNS.items():
             for pattern in patterns:
@@ -331,37 +385,8 @@ class FileSplitter:
         Returns:
             Proper relative path like "com/macys/dto/ClaimDto.java"
         """
-        # Type to package suffix mapping
-        type_to_package = {
-            'entity': 'entity',
-            'repository': 'repository',
-            'service': 'service',
-            'controller': 'controller',
-            'dto': 'dto',
-            'exception': 'exception',
-            'config': 'config',
-            'validator': 'validation',
-            'security': 'security',
-            'util': 'util',
-            'other': '',  # Keep in base path
-        }
-        
-        # Normalize base path
-        base = base_path.rstrip('/')
-        
-        # Get suffix for class type
-        suffix = type_to_package.get(class_type, '')
-        
-        # Special case: if base path already ends with the type suffix, don't duplicate
-        if suffix and base.endswith(f'/{suffix}'):
-            return f"{base}/{class_name}.java"
-        
-        # Special case: if base contains a domain segment (like 'user', 'usermanagement')
-        # and we're not adding a type suffix that's already in the path
-        if suffix:
-            return f"{base}/{suffix}/{class_name}.java"
-        else:
-            return f"{base}/{class_name}.java"
+        # base_path already has full path including subdomain, just append class file
+        return f"{base_path}/{class_name}.java"
     
     def intelligent_split(self, content: str, base_path: str = "", language: str = "java") -> list[FileSegment]:
         """
@@ -381,17 +406,11 @@ class FileSplitter:
             List of FileSegment objects
         """
         # Strategy 1: Try explicit markers first
-        segments = self.split_content(content, language)
-        if segments:
-            return segments
+        # Use class extraction only - ignore LLM-generated file markers
+        # to prevent wrong paths from being used
+        segments = self.split_content(content, base_path, language=language)
         
-        # Strategy 2: For Java, try class-based splitting
-        if language == 'java':
-            segments = self.split_java_classes(content, base_path)
-            if segments:
-                return segments
-        
-        return []
+        return segments
     
     def _build_domain_consolidation_map(self, domains: set[str]) -> dict[str, str]:
         """
@@ -516,6 +535,62 @@ class FileSplitter:
                     log.info(f"Duplicate {seg.relative_path}: Keeping existing (better or equal: {existing_score} vs {new_score})")
         
         unique_segments = list(seen_paths.values())
+        
+        # Cross-package deduplication: Detect same class name in different package paths
+        # e.g., com/macys/dto/ClaimDto.java vs com/macys/user/dto/ClaimDto.java
+        class_name_to_segments = {}
+        for seg in unique_segments:
+            if seg.language == 'java':
+                # Extract class name from path
+                class_name = Path(seg.relative_path).stem
+                if class_name not in class_name_to_segments:
+                    class_name_to_segments[class_name] = []
+                class_name_to_segments[class_name].append(seg)
+        
+        # For classes with multiple paths, pick the best one and discard others
+        segments_to_keep = set(id(seg) for seg in unique_segments)  # Start with all
+        for class_name, segs in class_name_to_segments.items():
+            if len(segs) > 1:
+                # Score each segment - prefer flat type-based structure
+                def score_segment(seg):
+                    score = 0
+                    path = seg.relative_path
+                    parts = path.split('/')
+                    
+                    # Prefer flat mst structure: com/macys/mst/<service>/<type>
+                    # Check if path follows new flat structure
+                    if len(parts) >= 4 and parts[0] == 'com' and parts[1] == 'macys' and parts[2] == 'mst':
+                        score += 50  # Strong preference for new flat structure
+                    
+                    # Deprecate old domain-based nesting: com/macys/<domain>/<type>
+                    if len(parts) >= 3 and parts[0] == 'com' and parts[1] == 'macys' and parts[2] not in ['mst', 'app']:
+                        if parts[2] not in ['dto', 'entity', 'service', 'repository', 'controller', 'config', 'util']:
+                            score -= 30  # Penalize old domain-based paths
+                    
+                    # Prefer content with package declarations (more complete)
+                    if 'package ' in seg.content:
+                        score += 20
+                    
+                    # Prefer content with imports
+                    score += seg.content.count('import ') * 2
+                    
+                    # Prefer longer content (more complete implementation)
+                    score += len(seg.content) // 100
+                    
+                    return score
+                
+                # Sort by score descending
+                segs.sort(key=score_segment, reverse=True)
+                best_seg = segs[0]
+                
+                # Remove all but the best from the keep set
+                for seg in segs[1:]:
+                    if id(seg) in segments_to_keep:
+                        segments_to_keep.remove(id(seg))
+                        log.warning(f"Cross-package duplicate removed: {seg.relative_path} -> {best_seg.relative_path} (class: {class_name})")
+        
+        # Filter unique_segments to only keep the ones we want
+        unique_segments = [seg for seg in unique_segments if id(seg) in segments_to_keep]
         
         # Smart domain consolidation - auto-detect similar domains from all segments
         # Collect all unique domain names from Java paths

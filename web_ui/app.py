@@ -98,11 +98,11 @@ def run_migration(repo_path: str, target: str, job_id: str, use_streaming: bool 
         
         # Load config and setup
         config = load_config()
-        # Force fast model and disable accuracy loop
+        # Force fast model but ENABLE accuracy loop for quality
         config['llm'] = config.get('llm', {})
         config['llm']['model'] = 'gemini-2.5-flash'
-        config['llm']['chunk_size'] = 400  # Large chunks to avoid splitting files
-        config['accuracy'] = {'enabled': False}
+        config['llm']['chunk_size'] = 400  # Larger chunks to capture full methods
+        config['accuracy'] = {'enabled': True, 'threshold': 0.85, 'max_iterations': 3}
         target_enum = TargetLanguage(target.lower())
         output_base = Path(__file__).parent.parent / 'output'
         output_base.mkdir(parents=True, exist_ok=True)
@@ -151,6 +151,13 @@ def _run_streaming_migration(repo_path, target_enum, config, output_base, queue,
     from accuracy.loop import SelfHealingAccuracyLoop
     
     skip_patterns = skip_patterns or []
+    
+    # Check if repo_path is a single file - if so, use parent folder
+    repo_path_obj = Path(repo_path)
+    # Use both is_file() check and extension check for robustness
+    if repo_path_obj.is_file() or str(repo_path).lower().endswith('.cs'):
+        log.warning(f"Source path is a file, using parent folder: {repo_path_obj.parent}")
+        repo_path = str(repo_path_obj.parent)
     
     # Layer 1: Ingestion
     log.info("[1/6] Ingesting repository...")
@@ -203,7 +210,7 @@ def _run_streaming_migration(repo_path, target_enum, config, output_base, queue,
     
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Ensure manifest ID matches job_id so OutputGenerator uses correct directory
+    # Set manifest ID for consistency across components
     manifest.id = job_id
     
     # Convert files one at a time
@@ -248,9 +255,11 @@ def _run_streaming_migration(repo_path, target_enum, config, output_base, queue,
         # Update migration doc if available
         if hasattr(manifest, 'migration_doc') and manifest.migration_doc:
             for file_path, stats in accuracy_stats.get('file_stats', {}).items():
-                manifest.migration_doc.update_file_record(
+                manifest.migration_doc.add_file_record(
                     source_path=file_path,
-                    validation_issues=stats.get('fixes', []),
+                    source_content="",
+                    converted_code="",
+                    errors=stats.get('fixes', []),
                     confidence=stats.get('final_score', 0) / 100.0  # Convert percentage to 0-1
                 )
     else:

@@ -14,7 +14,6 @@ from shared.models import (
     ConversionStatus, ComplexityTier, TargetLanguage,
 )
 from shared.config import get_logger
-from conversion.rule_engine.engine import RuleEngine
 from conversion.llm_converter.converter import LLMConverter
 from output.generator import OutputGenerator
 from output.migration_doc import MigrationDocument, MigrationStatus
@@ -32,13 +31,12 @@ class StreamingConversionPipeline:
 
     def __init__(self, config: dict):
         self.config = config
-        self.rule_engine = RuleEngine(config)
         self.llm_converter = LLMConverter(config)
         self.output_generator = OutputGenerator(config)
         self._threshold = config.get("conversion", {}).get("confidence_threshold", 0.75)
-        self._rule_first = config.get("conversion", {}).get("rule_engine_first", True)
         self._stats = {"green": 0, "amber": 0, "red": 0, "total_tokens": 0, "processed": 0}
         self.base_package = config.get("java", {}).get("base_package", "com.macys").replace(".", "/")
+        self.service_name: Optional[str] = None  # Auto-detected from source files
         self.migration_doc: Optional[MigrationDocument] = None
 
     def convert_manifest_streaming(
@@ -60,11 +58,30 @@ class StreamingConversionPipeline:
             raise ValueError("WorkspaceManifest has no target_language set")
 
         target = manifest.target_language
-        order = manifest.dependency_graph.topological_order() if manifest.dependency_graph else [
-            f.path for f in manifest.files
-        ]
+        
+        # Store output_dir and manifest for use in other methods
+        self._output_dir = output_dir
+        self._manifest = manifest
+        
+        # Use dependency graph for leaf-first processing
+        if manifest.dependency_graph:
+            order = manifest.dependency_graph.topological_order()
+            log.info(f"Using dependency-based ordering: {len(order)} files in dependency order (leaves first)")
+            
+            # Log first few files to show leaf-first ordering
+            if order:
+                sample = order[:5]
+                deps_info = []
+                for path in sample:
+                    deps = manifest.dependency_graph.edges.get(path, []) if manifest.dependency_graph else []
+                    dep_count = len(deps)
+                    deps_info.append(f"{Path(path).name}({dep_count} deps)")
+                log.info(f"  First files (leaves have 0 deps): {', '.join(deps_info)}")
+        else:
+            order = [f.path for f in manifest.files]
+            log.info(f"No dependency graph, using file order: {len(order)} files")
 
-        # Filter out non-convertible files
+        # Filter out non-convertible files while preserving dependency order
         convertible_files = []
         skipped_files = []
         for path in order:
@@ -83,7 +100,7 @@ class StreamingConversionPipeline:
         
         order = convertible_files
         total_files = len(order)
-        log.info(f"Streaming conversion: {total_files} files to process")
+        log.info(f"Streaming conversion: {total_files} files to process in dependency order (leaves first)")
         
         # Initialize migration document for tracking
         self.migration_doc = MigrationDocument(output_dir)
@@ -133,10 +150,15 @@ class StreamingConversionPipeline:
                 log.warning(f"[{idx}/{total_files}] File not found in manifest: {path}")
                 continue
 
+            # Check dependencies for this file
+            deps = manifest.dependency_graph.edges.get(path, []) if manifest.dependency_graph else []
+            dep_names = [Path(d).name for d in deps[:3]]  # Show first 3 deps
+            dep_info = f" (depends on: {', '.join(dep_names)}" + (f" +{len(deps)-3} more)" if len(deps) > 3 else ")") if deps else ""
+
             # Check if file was already converted in previous run
             if path in resumed_files:
                 record = resumed_files[path]
-                log.info(f"[{idx}/{total_files}] RESUMING {sf.path} - using cached conversion")
+                log.info(f"[{idx}/{total_files}] RESUMING {sf.path}{dep_info} - using cached conversion")
                 
                 # Reconstruct result from previous record
                 from shared.models import ConversionResult, ConversionStatus
@@ -165,8 +187,11 @@ class StreamingConversionPipeline:
                             splitter.write_segments(output_dir / "src" / "main" / "java", segments, base_package=self.base_package)
                             log.info(f"  ✓ Written output for {sf.path} (from cache)")
                         else:
-                            # Single file - write directly
-                            output_path = output_dir / "src" / "main" / "java" / Path(sf.path).with_suffix('.java')
+                            # Single file - write directly using proper Maven structure
+                            base_path = self._determine_package_path(sf)
+                            # Use original filename stem - preserve interface prefixes like "I"
+                            class_name = Path(sf.path).stem
+                            output_path = output_dir / "src" / "main" / "java" / Path(base_path) / f"{class_name}.java"
                             output_path.parent.mkdir(parents=True, exist_ok=True)
                             output_path.write_text(result.converted_code, encoding='utf-8')
                             log.info(f"  ✓ Written output for {sf.path} (from cache)")
@@ -192,7 +217,7 @@ class StreamingConversionPipeline:
                 yield result
                 continue
 
-            log.info(f"[{idx}/{total_files}] Converting {sf.path} (tier: {sf.complexity_tier.value})")
+            log.info(f"[{idx}/{total_files}] Converting {sf.path}{dep_info} (tier: {sf.complexity_tier.value})")
             
             # Convert single file
             start_time = time.time()
@@ -207,16 +232,62 @@ class StreamingConversionPipeline:
                 from shared.models import ConversionStatus
                 result = ConversionResult(
                     source_file=sf,
+                    target_language=target,
                     status=ConversionStatus.FAILED,
                     converted_code="",
                     confidence=0.0,
-                    errors=[str(e)]
+                    review_notes=str(e)
                 )
             
             # Update stats
             self._stats[sf.complexity_tier.value] += 1
             self._stats["total_tokens"] += result.total_tokens
             self._stats["processed"] = idx
+            
+            # ── Inline accuracy check for stubs ──────────────────────────────
+            if result.converted_code and target == TargetLanguage.JAVA_SPRING:
+                from accuracy.scorer import BehavioralScorer
+                import re
+                
+                scorer = BehavioralScorer()
+                score_report = scorer.score(sf.raw_content, result.converted_code, target)
+                
+                # Debug: Count methods
+                source_methods = len(re.findall(r'(public|private|protected)\s+\w+\s+\w+\s*\([^)]*\)\s*\{', sf.raw_content))
+                converted_methods = len(re.findall(r'(public|private|protected)\s+\w+\s+\w+\s*\([^)]*\)\s*\{', result.converted_code))
+                
+                log.info(f"  [Accuracy Check] Methods: {converted_methods}/{source_methods}, Score: {score_report.score:.1f}%")
+                if score_report.issues:
+                    log.info(f"     Issues found: {score_report.issues}")
+                
+                if score_report.score < 85 or converted_methods < source_methods:  # Aggressive check
+                    log.warning(f"  ⚠ DETECTED ISSUES - Retrying with anti-stub prompt...")
+                    
+                    # Build issues list including method count
+                    all_issues = score_report.issues or []
+                    if converted_methods < source_methods:
+                        all_issues.append(f"Missing {source_methods - converted_methods} method(s)")
+                    
+                    # Retry with explicit anti-stub instructions
+                    retry_result = self.llm_converter.convert_with_prompt(
+                        sf, target, 
+                        anti_stub=True,
+                        failure_issues=all_issues
+                    )
+                    
+                    if retry_result and retry_result.converted_code:
+                        # Check if retry is better
+                        retry_score = scorer.score(sf.raw_content, retry_result.converted_code, target)
+                        retry_methods = len(re.findall(r'(public|private|protected)\s+\w+\s+\w+\s*\([^)]*\)\s*\{', retry_result.converted_code))
+                        
+                        log.info(f"  [Retry] Methods: {retry_methods}/{source_methods}, Score: {retry_score.score:.1f}%")
+                        
+                        if retry_score.score > score_report.score or retry_methods > converted_methods:
+                            log.info(f"  ✓ Retry IMPROVED: score {score_report.score:.1f}→{retry_score.score:.1f}, methods {converted_methods}→{retry_methods}")
+                            result = retry_result
+                            result.confidence = retry_score.score / 100.0
+                        else:
+                            log.warning(f"  ✗ Retry did not improve, keeping best result")
             
             # Track in migration document
             if self.migration_doc:
@@ -260,27 +331,31 @@ class StreamingConversionPipeline:
             )
 
     def _convert_file(self, sf: SourceFile, target: TargetLanguage) -> ConversionResult:
-        """Convert a single file using appropriate strategy."""
-        result: ConversionResult
-
-        if sf.complexity_tier == ComplexityTier.GREEN and self._rule_first:
-            # Rule engine only
-            result = self.rule_engine.convert(sf, target)
-            if result.confidence >= self._threshold:
-                log.debug("  Rule engine sufficient (conf=%.2f)", result.confidence)
-                return result
-
-        if sf.complexity_tier == ComplexityTier.AMBER:
-            # Rule engine first, LLM refines if confidence low
-            result = self.rule_engine.convert(sf, target)
-            if result.confidence < self._threshold:
-                log.debug("  Rule engine insufficient, escalating to LLM")
-                result = self.llm_converter.convert(sf, target, prior_result=result)
-            return result
-
-        # RED tier or XAML — full LLM
-        result = self.llm_converter.convert(sf, target)
-
+        """Convert a single file using method-based LLM for all files."""
+        from conversion.method_based_converter import (
+            MethodBasedConverter, MethodExtractor,
+            _init_llm_log, _log_dependency_graph
+        )
+        from shared.models import ConversionStatus
+        
+        # Initialize LLM logging once per session
+        if not hasattr(self, '_llm_log_initialized'):
+            _init_llm_log(self._output_dir)
+            _log_dependency_graph(self._manifest)
+            self._llm_log_initialized = True
+        
+        # Use method-based conversion for all files
+        method_converter = MethodBasedConverter(self.llm_converter)
+        
+        # Debug: Extract and log methods found
+        extractor = MethodExtractor()
+        methods = extractor.extract_methods(sf.raw_content)
+        log.info(f"  [DEBUG] Found {len(methods)} methods in {sf.path}")
+        for m in methods:
+            log.info(f"    - {m.name}: {m.end_line - m.start_line} lines")
+        
+        result = method_converter.convert_file(sf, target, output_dir=str(self._output_dir))
+        
         # Flag for human review if still low confidence
         if result.confidence < self._threshold:
             result.status = ConversionStatus.NEEDS_REVIEW
@@ -317,7 +392,7 @@ class StreamingConversionPipeline:
             
             if segments:
                 written = splitter.write_segments(output_dir / "src" / "main" / "java", segments, base_package=self.base_package)
-                log.info("  Split into %d files: %s", len(written), 
+                log.info("  Split into %d files: %s", len(written),
                         [p.name for p in written])
                 return
         
@@ -326,114 +401,111 @@ class StreamingConversionPipeline:
         
         # Map extension based on target language
         if target == TargetLanguage.JAVA_SPRING:
-            output_path = output_dir / "src" / "main" / "java" / relative_path.with_suffix('.java')
+            # Use determined package path for correct Java structure
+            base_path = self._determine_package_path(source_file)
+            
+            # Extract class name from converted code or use source filename
+            # Remove 'I' prefix from interfaces (Java convention)
+            class_name = Path(source_file.path).stem
+            if class_name.startswith('I') and len(class_name) > 1:
+                # Check if it's an interface by looking at converted code
+                if 'interface' in result.converted_code[:500] or 'public interface' in result.converted_code:
+                    class_name = class_name[1:]  # Remove I prefix
+            
+            output_path = output_dir / "src" / "main" / "java" / Path(base_path) / f"{class_name}.java"
         elif target == TargetLanguage.REACT_JS:
             output_path = output_dir / "src" / relative_path.with_suffix('.tsx')
         else:
             output_path = output_dir / relative_path
-
-        # Create directories
+        
+        # Ensure parent directory exists
         output_path.parent.mkdir(parents=True, exist_ok=True)
-
+        
         # Write file
         output_path.write_text(result.converted_code, encoding='utf-8')
     
     def _determine_package_path(self, source_file: SourceFile) -> str:
         """
-        Determine Java package path from source file.
-        Creates consistent domain-based structure: com.macys.<domain>
+        Determine Java base package path - CONSOLIDATED single domain approach.
         
-        Examples:
-            UserController.cs -> com/macys/user
-            UserManagementService.cs -> com/macys/usermanagement
-            OrderService.cs -> com/macys/order
+        All files go into: com.macys.mst.<domain>.<type>.<subdomain>
+        Example: com.macys.mst.order.service.externalapi
+        
+        Domain is extracted once from input folder (e.g., LegacyOrderService -> order).
+        Type is based on class type (service, repository, helper, etc).
+        Subdomain is the service name extracted from class name.
         """
         import re
         src_path = Path(source_file.path)
         stem = src_path.stem
         
-        # Extract domain from class name by removing type suffixes
-        # UserController -> user, UserManagementService -> usermanagement
+        # Extract domain once from input folder structure
+        domain = self._extract_domain_from_input(src_path)
+        
+        # Extract service name from class name by removing type suffixes
         type_suffixes = [
             'Controller', 'Service', 'Repository', 'Repo', 'Dao', 'Impl',
             'Entity', 'Model', 'Dto', 'DTO', 'Request', 'Response',
             'Validator', 'Config', 'Configuration', 'Util', 'Helper',
-            'Exception', 'Handler', 'Mapper', 'Factory', 'Host'
+            'Exception', 'Handler', 'Mapper', 'Factory', 'Host', 'Processing'
         ]
         
-        domain = stem
+        subdomain = stem
         for suffix in type_suffixes:
-            if domain.endswith(suffix):
-                domain = domain[:-len(suffix)]
+            if subdomain.endswith(suffix):
+                subdomain = subdomain[:-len(suffix)]
                 break
+        subdomain = re.sub(r'([a-z])([A-Z])', r'\1\2', subdomain).lower()
+        subdomain = re.sub(r'[^a-z0-9]', '', subdomain)
         
-        # Convert to lowercase package name
-        # Handle camelCase by inserting underscores, then convert
-        domain = re.sub(r'([a-z])([A-Z])', r'\1\2', domain).lower()
+        # Determine type folder based on filename
+        if 'repository' in stem.lower():
+            type_folder = "repository"
+        elif 'service' in stem.lower():
+            type_folder = "service"
+        elif 'helper' in stem.lower():
+            type_folder = "helper"
+        elif 'util' in stem.lower():
+            type_folder = "util"
+        elif 'controller' in stem.lower():
+            type_folder = "controller"
+        else:
+            type_folder = "model"
         
-        # Clean up - remove any non-alphanumeric
-        domain = re.sub(r'[^a-z0-9]', '', domain)
+        # Return consolidated path: com/macys/mst/<domain>/<type>/<subdomain>
+        return f"com/macys/mst/{domain}/{type_folder}/{subdomain}"
+    
+    def _extract_domain_from_input(self, src_path: Path) -> str:
+        """Extract single consolidated domain from input folder structure."""
+        # Common suffixes/prefixes to remove
+        suffixes = ['service', 'core', 'legacy', 'host', 'api', 'web', 'app', 'system', 'platform']
+        prefixes = ['legacy', 'core']
         
-        # Smart domain consolidation - normalize common variations
-        # This works generically for any domain without hardcoding specific names
-        domain = self._normalize_domain(domain)
+        domain = "shared"  # Default
         
-        # Additional type suffix removal for common Java patterns
-        type_suffixes = ['service', 'controller', 'repository', 'repo', 'dao', 'impl',
-                        'entity', 'model', 'dto', 'request', 'response', 'validator',
-                        'config', 'util', 'helper', 'exception', 'handler', 'mapper',
-                        'factory', 'host', 'process', 'processing', 'management']
-        
-        for suffix in type_suffixes:
-            if domain.endswith(suffix) and len(domain) > len(suffix):
-                domain = domain[:-len(suffix)]
+        for part in src_path.parts:
+            part_lower = part.lower()
+            # Skip non-domain folders
+            if part_lower in ('input', 'output', 'src', 'main', 'java', 'com', 'macys', 'mst',
+                            'conversion', 'models', 'repositories', 'services', 'controllers',
+                            'helpers', 'interfaces', 'bin', 'obj', 'properties'):
+                continue
+            
+            # Clean the part
+            cleaned = part_lower
+            for prefix in prefixes:
+                if cleaned.startswith(prefix):
+                    cleaned = cleaned[len(prefix):]
+            for suffix in suffixes:
+                if cleaned.endswith(suffix) and len(cleaned) > len(suffix):
+                    cleaned = cleaned[:-len(suffix)]
+            
+            if cleaned and len(cleaned) > 2:
+                domain = cleaned
                 break
-        
-        # Final plural normalization
-        if domain.endswith('s') and len(domain) > 1:
-            domain = domain[:-1]
-        
-        # Ensure we have a valid domain name
-        if not domain or len(domain) < 2:
-            domain = "app"
-        
-        return f"{self.base_package}/{domain}"
-
-    def _normalize_domain(self, domain: str) -> str:
-        """
-        Smart domain consolidation - normalize common variations.
-        Works generically for any domain without hardcoding.
-        
-        Examples:
-        - users -> user (plural normalization)
-        - userservice -> user (type suffix removal)
-        - usercontroller -> user (type suffix removal)
-        """
-        import re
-        
-        # Common suffixes that indicate type (not part of domain)
-        type_suffixes = ['service', 'controller', 'repository', 'repo', 'dao', 'impl',
-                        'entity', 'model', 'dto', 'request', 'response', 'validator',
-                        'config', 'util', 'helper', 'exception', 'handler', 'mapper',
-                        'factory', 'host', 'process', 'processing', 'management', 'api']
-        
-        domain = domain.lower()
-        
-        # Remove type suffixes
-        for suffix in type_suffixes:
-            if domain.endswith(suffix) and len(domain) > len(suffix) + 1:
-                domain = domain[:-len(suffix)]
-                break
-        
-        # Normalize plural (remove trailing s if present)
-        if domain.endswith('s') and len(domain) > 1:
-            domain = domain[:-1]
-        
-        # Clean up any remaining non-alphanumeric
-        domain = re.sub(r'[^a-z0-9]', '', domain)
         
         return domain
-
+    
     def get_stats(self) -> dict:
         """Get current conversion stats."""
         return self._stats.copy()

@@ -26,7 +26,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "llm": {
         "model": "gemini-2.0-flash",
         "max_tokens": 8000,
-        "chunk_size": 300,
+        "chunk_size": 150,
         "context_window": 4,
         "temperature": 0.1,
     },

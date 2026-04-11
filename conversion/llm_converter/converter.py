@@ -66,6 +66,17 @@ _JAVA_SPRING_SPECIFICS = """
 
 ## Business Logic Translation Rules
 - CRITICAL: NEVER stub out methods with TODOs - always convert the full implementation
+- CRITICAL: NEVER output mock implementations or placeholder logic like "mock logic" or "simulate work"
+- CRITICAL: NEVER use comments like "This method would contain..." or "For example:" or "Further methods would be..." - just convert the actual code
+- CRITICAL: NEVER use excuses like "This method's detailed logic was not provided" or "In a real scenario" - you HAVE the source code, convert it fully
+- CRITICAL: NEVER use placeholder log statements instead of actual business logic - convert the real implementation
+- CRITICAL: NEVER end a file with comments saying more methods "would be implemented" - convert ALL methods or explicitly show the converted method signatures
+- CRITICAL: MUST convert ALL methods completely - if you run out of space in a chunk, convert fewer methods but fully, don't leave stubs
+- CRITICAL: MUST convert ALL loop bodies with actual iteration logic, not just comments showing what would happen
+- CRITICAL: MUST convert ALL repository calls (findById, save, etc.) to actual JPA calls
+- CRITICAL: MUST convert ALL conditional branches (if/else) with actual logic, not just log statements
+- CRITICAL: MUST convert ALL variable assignments and calculations - preserve exact math operations
+- CRITICAL: MUST convert ALL method calls to appropriate Java equivalents
 - Preserve ALL business rules exactly — don't simplify conditional logic
 - Convert all validation rules to bean validation annotations or explicit checks
 - Maintain exact calculation logic — don't optimize or change math operations
@@ -233,12 +244,12 @@ class LLMConverter:
     ) -> ConversionResult:
         """
         Convert a source file using the LLM.
-        If prior_result exists (from rule engine), refines it instead.
+        Always converts original source file content for full context.
         If component_info exists, uses component-specific template.
         """
-        source_code = prior_result.converted_code if (
-            prior_result and prior_result.converted_code
-        ) else sf.raw_content
+        # ALWAYS use original source file content - never convert rule engine output
+        # The LLM needs the full source to properly convert business logic
+        source_code = sf.raw_content
 
         # Check cache for small / repeated files
         cached = self.cache.get(source_code, sf.language, target)
@@ -261,6 +272,7 @@ class LLMConverter:
         confidence_scores: list[float] = []
 
         for idx, chunk in enumerate(chunks):
+            log.info(f"  Converting chunk {idx + 1}/{len(chunks)} ({len(chunk.splitlines())} lines)...")
             converted, tokens, confidence = self._convert_chunk(
                 chunk=chunk,
                 chunk_index=idx,
@@ -292,6 +304,62 @@ class LLMConverter:
             llm_chunks_used=len(chunks),
             total_tokens=total_tokens,
         )
+
+    def convert_with_prompt(
+        self,
+        sf: SourceFile,
+        target: TargetLanguage,
+        anti_stub: bool = False,
+        failure_issues: list = None,
+    ) -> ConversionResult:
+        """Convert with custom prompt additions (for retry with anti-stub instructions)."""
+        source_code = sf.raw_content
+        
+        # Build enhanced prompt with anti-stub instructions
+        extra_rules = []
+        if anti_stub:
+            extra_rules.append("""
+## CRITICAL ANTI-STUB RULES (Previous attempt had incomplete logic!)
+- The previous attempt had placeholder comments or missing methods
+- You MUST convert ALL methods completely with actual implementation
+- NEVER claim "logic was not provided" - you have the full source above
+- NEVER use "would be implemented" or "For example" comments
+- Convert the actual business logic, not placeholder descriptions
+""")
+        
+        if failure_issues:
+            extra_rules.append(f"""
+## PREVIOUS FAILURE REASONS (Fix these!)
+{chr(10).join(f'- {issue}' for issue in failure_issues[:5])}
+""")
+        
+        # Get base prompt and add extras
+        base_prompt = self._build_generic_prompt(
+            source_code, chunk_index=0, total_chunks=1, 
+            source_file=sf, target=target, context_summary=""
+        )
+        enhanced_prompt = base_prompt + "\n".join(extra_rules)
+        
+        # Convert single chunk with enhanced prompt
+        try:
+            if not self.model_instance:
+                return None
+                
+            response = self.model_instance.generate_content(enhanced_prompt)
+            converted = response.text if response else ""
+            
+            return ConversionResult(
+                source_file=sf,
+                target_language=target,
+                converted_code=converted,
+                status=ConversionStatus.LLM_CONVERTED,
+                confidence=0.85,  # Higher confidence for retry
+                llm_chunks_used=1,
+                total_tokens=len(converted.split()),
+            )
+        except Exception as e:
+            log.error(f"Anti-stub retry failed: {e}")
+            return None
 
     def _split_into_chunks(self, code: str) -> list[str]:
         """Split code into chunks, trying to respect class/method boundaries."""
@@ -470,12 +538,48 @@ Each public class should be in its own file.
         return f"[Chunk {idx}]\n{summary}"
 
     def _estimate_confidence(self, code: str) -> float:
-        """Heuristic confidence score based on TODO count and code structure."""
+        """Heuristic confidence score based on TODO count, stub detection, and code structure."""
+        import re
+        
         todos = code.count("TODO")
         lines = max(code.count("\n"), 1)
         todo_ratio = todos / lines
-        if todo_ratio > 0.1:
-            return 0.5
+        
+        # Detect stub/mock implementations
+        stub_patterns = [
+            r'mock logic',
+            r'simulate.*work',
+            r'This method would contain',
+            r'For example:',
+            r'//.*would.*contain',
+            r'Thread\.sleep\s*\(',
+            r'//.*example implementation',
+            r'//.*actual implementation',
+        ]
+        
+        stub_score = 0
+        code_lower = code.lower()
+        for pattern in stub_patterns:
+            if re.search(pattern, code, re.IGNORECASE):
+                stub_score += 1
+        
+        # Check for methods that only have comments and log statements
+        # Pattern: method body with only comments and log/sleep
+        method_bodies = re.findall(r'\{([^}]*)\}', code, re.DOTALL)
+        for body in method_bodies:
+            body_lines = [l.strip() for l in body.split('\n') if l.strip()]
+            non_comment_lines = [l for l in body_lines if not l.startswith('//') and not l.startswith('/*') and not l.startswith('*')]
+            # If body has only log statements, sleep, or comments, it's a stub
+            if non_comment_lines and all(
+                re.match(r'log\w*\.|system\.out\.|thread\.sleep|logger\.', l.lower()) or 
+                l in ['}', '{']
+                for l in non_comment_lines
+            ):
+                stub_score += 2
+        
+        # Calculate confidence
+        if stub_score > 0 or todo_ratio > 0.1:
+            return 0.3  # Low confidence for stubs
         if todo_ratio > 0.05:
             return 0.7
         return 0.9

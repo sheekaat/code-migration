@@ -163,6 +163,11 @@ The code has SPECIFIC issues listed below. Fix ONLY those issues.
 Do not refactor, rename, or restructure anything else.
 Return the complete fixed code. No explanations. No markdown fences.
 
+## CRITICAL: NO Stubs or Placeholders
+- NEVER add mock implementations, Thread.sleep, or placeholder comments
+- NEVER use "This method would contain" or "For example" comments
+- MUST provide actual working implementations for all fixes
+
 ## Issues to fix
 {issues_list}
 
@@ -195,6 +200,18 @@ The specific failures were:
 Fix all of these issues in your conversion.
 Return ONLY the converted code. No markdown fences. No explanation.
 Add '// TODO: Manual review' for any logic you cannot confidently translate.
+
+## CRITICAL: Convert ALL Business Logic (Previous attempt had stubs!)
+- NEVER output mock implementations, placeholder logic, or Thread.sleep
+- NEVER use comments like "This method would contain" or "For example" or "Further methods would be..."
+- NEVER claim "logic was not provided" - you HAVE the full source, convert it completely
+- NEVER use "In a real scenario" or placeholder log statements - convert the ACTUAL implementation
+- NEVER leave commented-out code blocks showing "what would be implemented" - implement it!
+- MUST convert ALL methods from the source file - count them and ensure same number in output
+- MUST convert ALL loop bodies, conditionals, and method calls with actual working code
+- MUST convert ALL repository/service calls to actual JPA/Spring code
+- MUST include ALL private helper methods - don't skip them
+- Convert EVERY line of business logic - don't skip anything
 
 ## Source code
 {source}
